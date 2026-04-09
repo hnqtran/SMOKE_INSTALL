@@ -22,6 +22,15 @@ export SPACK_ROOT="${PWD}/spack"
 INSTALL_ROOT="${PWD}/install"
 mkdir -p "$INSTALL_ROOT"
 
+# 2b. Auto-Provision Spack
+if [[ ! -d "$SPACK_ROOT" ]]; then
+    echo "==> Spack not found at $SPACK_ROOT. Cloning from GitHub..."
+    git clone -c feature.manyFiles=true https://github.com/spack/spack.git "$SPACK_ROOT" || {
+        echo "ERROR: Failed to clone Spack. Please check your internet connection."
+        exit 1
+    }
+fi
+
 # 3. Source Spack
 source "$SPACK_ROOT/share/spack/setup-env.sh"
 
@@ -74,7 +83,7 @@ elif [[ "$COMPILER" == "%oneapi" ]]; then
     echo "==> Bootstrapping Intel oneAPI toolchain..."
     spack install --no-cache intel-oneapi-compilers@2025.3.2 %gcc@14.3.0
     INTEL_BASE=$(spack location -i intel-oneapi-compilers@2025.3.2)
-    INTEL_BIN_DIR=$(find "$INTEL_BASE" -name "icx" -exec dirname {} \;)
+    INTEL_BIN_DIR=$(find "$INTEL_BASE" -name "icx" -exec dirname {} \; | head -n 1)
     
     # Authoritative oneAPI Registration
     # Prevents the "ifx vs gfortran" split by mandating icx/ifx in a site-scope definition.
