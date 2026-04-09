@@ -26,7 +26,7 @@ mkdir -p "$INSTALL_ROOT"
 source "$SPACK_ROOT/share/spack/setup-env.sh"
 
 # 4. Repository Registration
-spack repo add ./packages --scope site smoke_v5.2 || true
+spack repo add --scope site ./packages || true
 
 # 5. Toolchain Selection
 COMPILER="${1:-%gcc}"
