@@ -4,6 +4,19 @@ set -e
 # ==============================================================================
 # AUTHORITATIVE SMOKE SPACK DEPLOYMENT ENGINE
 # ------------------------------------------------------------------------------
+# USAGE:
+#   ./install.sh %gcc               # Compiles SMOKE 5.2.1 with GCC 14
+#   ./install.sh %aocc              # Compiles SMOKE 5.2.1 with AOCC 5.1
+#   ./install.sh %intel             # Compiles SMOKE 5.2.1 with Intel oneAPI (or %oneapi)
+#
+#   ./install.sh "smoke@master %gcc"  # Compiles latest master with GCC 14
+#   ./install.sh "smoke@5.2.1 %aocc"  # Compiles stable 5.2.1 with AOCC 5.1
+#
+# CUSTOM VERSIONS:
+#   1. Edit ./packages/smoke/package.py
+#   2. Add a new 'version("my-ver", ...)' line
+#   3. Run ./install.sh "smoke@my-ver %gcc"
+# ------------------------------------------------------------------------------
 # RATIONALE:
 # This script enforces absolute toolchain parity by isolating the build from the
 # host environment and bootstrapping a modern toolchain (GCC 14) from source.
@@ -12,11 +25,11 @@ set -e
 # ==============================================================================
 
 # 1. Environment Isolation
-# We disable local config to ensure that ~/.spack/ does not contaminate the build.
-# This makes the installation fully portable and reproducible across nodes.
 export SPACK_DISABLE_LOCAL_CONFIG=1
 export SPACK_USER_CACHE_PATH="${PWD}/.spack-cache"
 export SPACK_ROOT="${PWD}/spack"
+unset PYTHONPATH # Prevent contamination from host Spack or Python libs
+mkdir -p "$SPACK_USER_CACHE_PATH"
 
 # 2. Scope & Paths
 INSTALL_ROOT="${PWD}/install"
@@ -35,10 +48,25 @@ fi
 source "$SPACK_ROOT/share/spack/setup-env.sh"
 
 # 4. Repository Registration
-spack repo add --scope site . || true
+# We force-refresh the repository and clean the metadata cache to prevent
+# stale path errors (e.g., "No module named spack_repo").
+echo "==> Refreshing Spack repository registration..."
+spack clean -m
+spack repo remove smoke_v52 >/dev/null 2>&1 || true
+spack repo add --scope site "$PWD"
+spack repo list
 
 # 5. Toolchain Selection
-COMPILER="${1:-%gcc}"
+ARG1="${1:-%gcc}"
+if [[ "$ARG1" == "%intel" || "$ARG1" == "%oneapi" ]]; then
+    COMPILER="%oneapi"
+elif [[ "$ARG1" == "%aocc" ]]; then
+    COMPILER="%aocc"
+elif [[ "$ARG1" == "%gcc" ]]; then
+    COMPILER="%gcc"
+else
+    COMPILER="$ARG1"
+fi
 echo "==> Preparing Spack for SMOKE Compilation with $COMPILER at $INSTALL_ROOT"
 
 # 6. Authoritative Bootstrapping
@@ -49,13 +77,13 @@ spack compiler find --scope site
 spack install --no-cache gcc@14.3.0
 
 # Register GCC 14 as the site-supported foundation for C++ and Fortran runtimes.
-GCC_DIR=$(spack location -i gcc@14.3.0)
+GCC_DIR=$(spack find --format "{prefix}" gcc@14.3.0 | head -n 1)
 spack compiler add --scope site "$GCC_DIR"
 
 if [[ "$COMPILER" == "%aocc" ]]; then
     echo "==> Bootstrapping AOCC toolchain..."
     spack install --no-cache aocc@5.1.0 %gcc@14.3.0
-    AOCC_DIR=$(spack location -i aocc@5.1.0)
+    AOCC_DIR=$(spack find --format "{prefix}" aocc@5.1.0 | head -n 1)
     
     # Authoritative AOCC Site-Registration
     # We manually write compilers.yaml to ensure Spack has exact binary paths
@@ -82,7 +110,7 @@ EOF
 elif [[ "$COMPILER" == "%oneapi" ]]; then
     echo "==> Bootstrapping Intel oneAPI toolchain..."
     spack install --no-cache intel-oneapi-compilers@2025.3.2 %gcc@14.3.0
-    INTEL_BASE=$(spack location -i intel-oneapi-compilers@2025.3.2)
+    INTEL_BASE=$(spack find --format "{prefix}" intel-oneapi-compilers@2025.3.2 | head -n 1)
     INTEL_BIN_DIR=$(find "$INTEL_BASE" -name "icx" -exec dirname {} \; | head -n 1)
     
     # Authoritative oneAPI Registration
@@ -114,13 +142,12 @@ fi
 
 # 7. Surgical Lockdown Phase
 # CRITICAL: We remove all other compilers from Spack's site-scope.
-# This forces Spack to use the target toolchain (AOCC/Intel) for EVERY dependency.
-# Without this, Spack might sneak in the bootstrap GCC for Fortran modules.
 echo "==> Locking down toolchain to $FAM_SPEC..."
-spack compiler remove -a --scope site gcc@11.5.0 || true
-spack compiler remove -a --scope site llvm || true
+spack compiler remove -a --scope site gcc@11.5.0 >/dev/null 2>&1 || true
+spack compiler remove -a --scope site llvm >/dev/null 2>&1 || true
 if [[ "$FAM_SPEC" != "%oneapi" ]]; then
-    spack compiler remove -a --scope site intel-oneapi-compilers || true
+    spack compiler remove -a --scope site oneapi >/dev/null 2>&1 || true
+    spack compiler remove -a --scope site intel-oneapi-compilers >/dev/null 2>&1 || true
 fi
 
 # Authoritative Package Mandate
@@ -158,8 +185,12 @@ echo "==> Compiling SMOKE natively..."
 if [[ "$COMPILER" == smoke* ]]; then
     FULL_SPEC="$COMPILER"
 else
-    # Default to stable 5.2.1 as verified by our parity tests.
-    FULL_SPEC="smoke@5.2.1 $FAM_SPEC"
+    # Default to master for Intel oneAPI as requested, stability for others.
+    if [[ "$FAM_SPEC" == "%oneapi" ]]; then
+        FULL_SPEC="smoke@master $FAM_SPEC"
+    else
+        FULL_SPEC="smoke@5.2.1 $FAM_SPEC"
+    fi
 fi
 
 echo "DEBUG: FINAL FULL_SPEC=[$FULL_SPEC]"
@@ -167,7 +198,7 @@ spack install --no-cache $FULL_SPEC
 
 # 9. Post-Install Setup
 # Create a shortcut to the latest build.
-SMOKE_INSTALL=$(spack location -i $FULL_SPEC)
+SMOKE_INSTALL=$(spack find --format "{prefix}" $FULL_SPEC | head -n 1)
 rm -rf smoke-latest
 ln -s "$SMOKE_INSTALL" smoke-latest
 
