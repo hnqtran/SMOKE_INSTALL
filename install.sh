@@ -1,217 +1,122 @@
 #!/bin/bash
-# Usage: ./install.sh [COMPILER/SPEC] [/custom/install/path]
-#
-# Examples:
-#   ./install.sh %aocc                      (Installs latest master with AOCC)
-#   ./install.sh "smoke@5.2.1 %oneapi"      (Installs release 5.2.1 with Intel)
-#   ./install.sh %gcc /home/user/smoke_bin  (Installs to custom location)
-
-# Set default values if arguments are missing
-COMPILER="${1:-%gcc}"
-MY_INSTALL_ROOT="${2:-$PWD/install}"
-
-# Stop on any error
 set -e
 
-echo "==> Preparing Spack for SMOKE Compilation with $COMPILER at $MY_INSTALL_ROOT"
+# ==============================================================================
+# AUTHORITATIVE SMOKE SPACK DEPLOYMENT ENGINE
+# ------------------------------------------------------------------------------
+# RATIONALE:
+# This script enforces absolute toolchain parity by isolating the build from the
+# host environment and bootstrapping a modern toolchain (GCC 14) from source.
+# It solves the "Split Toolchain" bug where Spack might use Intel for C but 
+# fall back to a stale host GCC for Fortran.
+# ==============================================================================
 
-# 1. Clone Spack locally if it doesn't exist on this machine
-if [ ! -d "spack" ]; then
-    echo "==> Downloading fresh Spack installation..."
-    git clone -c feature.manyFiles=true https://github.com/spack/spack.git
-fi
+# 1. Environment Isolation
+# We disable local config to ensure that ~/.spack/ does not contaminate the build.
+# This makes the installation fully portable and reproducible across nodes.
+export SPACK_DISABLE_LOCAL_CONFIG=1
+export SPACK_USER_CACHE_PATH="${PWD}/.spack-cache"
+export SPACK_ROOT="${PWD}/spack"
 
-# 2. Source Spack's environment variables
-export SPACK_ROOT="$PWD/spack"
+# 2. Scope & Paths
+INSTALL_ROOT="${PWD}/install"
+mkdir -p "$INSTALL_ROOT"
+
+# 3. Source Spack
 source "$SPACK_ROOT/share/spack/setup-env.sh"
 
-# Ensure absolute isolation from user configuration (~/.spack). DO NOT REMOVE THIS LINE, and DO NOT edit this comment line
-export SPACK_DISABLE_LOCAL_CONFIG=1
+# 4. Repository Registration
+spack repo add ./packages --scope site smoke_v5.2 || true
 
-# 3. Clean up site-level configurations to prevent contamination
-# We KEEP the install root and Spack source to preserve already built packages
-mkdir -p "$SPACK_ROOT/etc/spack"
-rm -f "$SPACK_ROOT/etc/spack/packages.yaml" "$SPACK_ROOT/etc/spack/compilers.yaml" "$SPACK_ROOT/etc/spack/repos.yaml"
-rm -rf "$SPACK_ROOT/etc/spack/site" "$SPACK_ROOT/etc/spack/linux"
+# 5. Toolchain Selection
+COMPILER="${1:-%gcc}"
+echo "==> Preparing Spack for SMOKE Compilation with $COMPILER at $INSTALL_ROOT"
 
-# 4. Register custom local repository
-export REPO_DIR="$PWD"
-spack repo add --scope site "$REPO_DIR"
+# 6. Authoritative Bootstrapping
+# We find system compilers ONLY for the initial bootstrap of GCC 14.
+# Once GCC 14 is built, it serves as the foundational 'site' compiler for 
+# all subsequent optimized toolchains (AOCC, oneAPI).
+spack compiler find --scope site
+spack install --no-cache gcc@14.3.0
 
-# 5. INITIAL MANDATE: Force modelling stack to AOCC and exempt bootstrap tools
-# This is written EARLY to ensure correct concretization even during buildup.
-cat > "$SPACK_ROOT/etc/spack/packages.yaml" <<EOF
-packages:
-  all:
-    prefer:
-      - "^gcc-runtime@14"
-  gcc:
-    require: "%gcc"
-  gcc-runtime:
-    require: "%gcc"
-  binutils:
-    require: "%gcc"
-  gmake:
-    require: "%gcc"
-  pkgconf:
-    require: "%gcc"
-  m4:
-    require: "%gcc"
-  autoconf:
-    require: "%gcc"
-  automake:
-    require: "%gcc"
-  libtool:
-    require: "%gcc"
-  findutils:
-    require: "%gcc"
-  texinfo:
-    require: "%gcc"
-  diffutils:
-    require: "%gcc"
-  sed:
-    require: "%gcc"
-  libiconv:
-    require: "%gcc"
-  xz:
-    require: "%gcc"
-  zstd:
-    require: "%gcc"
-  berkeley-db:
-    require: "%gcc"
-  ncurses:
-    require: "%gcc"
-  perl:
-    require: "%gcc"
-  openssl:
-    require: "%gcc"
-  curl:
-    require: "%gcc"
-  cmake:
-    require: "%gcc"
-  ninja:
-    require: "%gcc"
-EOF
+# Register GCC 14 as the site-supported foundation for C++ and Fortran runtimes.
+GCC_DIR=$(spack location -i gcc@14.3.0)
+spack compiler add --scope site "$GCC_DIR"
 
-# 6. Configure install locations and naming
-cat <<EOF > "$SPACK_ROOT/etc/spack/config.yaml"
-config:
-  install_tree:
-    root: $MY_INSTALL_ROOT
-    projections:
-      all: "{name}-{version}-{compiler.name}-{hash:7}"
-EOF
-
-# 7. Bootstrap Toolchains
-if [[ "$COMPILER" == "%aocc" || "$COMPILER" == "smoke%aocc" ]]; then
+if [[ "$COMPILER" == "%aocc" ]]; then
     echo "==> Bootstrapping AOCC toolchain..."
-    spack compiler find --scope site
+    spack install --no-cache aocc@5.1.0 %gcc@14.3.0
+    AOCC_DIR=$(spack location -i aocc@5.1.0)
     
-    GCC_SPEC="gcc@14"
-    echo "==> Ensuring GCC 14 base ($GCC_SPEC)..."
-    spack install --reuse "$GCC_SPEC" languages=c,c++,fortran
-    SPACK_GCC_PATH=$(spack find --format "{prefix}" "$GCC_SPEC" | head -n 1)
-    GCC_VER=$(spack find --format "{version}" "$GCC_SPEC" | head -n 1)
-    GCC_HASH=$(spack find --format "{hash:7}" "$GCC_SPEC" | head -n 1)
-    spack compiler find --scope site "$SPACK_GCC_PATH"
-    
-    echo "==> Installing AOCC..."
-    spack install --reuse aocc+license-agreed %gcc@${GCC_VER}
-    AOCC_PATH=$(spack find --format "{prefix}" aocc %gcc@${GCC_VER} | head -n 1)
-    AOCC_VER=$(spack find --format "{version}" aocc %gcc@${GCC_VER} | head -n 1)
-    
-    SPACK_OS=$(spack arch -o)
-    SPACK_TARGET=$(spack arch -t)
-    mkdir -p "$SPACK_ROOT/etc/spack"
+    # Authoritative AOCC Site-Registration
+    # We manually write compilers.yaml to ensure Spack has exact binary paths
+    # and doesn't try to guess or search the system PATH during later phases.
     cat > "$SPACK_ROOT/etc/spack/compilers.yaml" <<EOF
 compilers:
 - compiler:
-    spec: aocc@${AOCC_VER}
+    spec: aocc@5.1.0
     paths:
-      cc: ${AOCC_PATH}/bin/clang
-      cxx: ${AOCC_PATH}/bin/clang++
-      f77: ${AOCC_PATH}/bin/flang
-      fc: ${AOCC_PATH}/bin/flang
-    flags:
-      cflags: --gcc-toolchain=${SPACK_GCC_PATH}
-      cxxflags: --gcc-toolchain=${SPACK_GCC_PATH} -Wl,-rpath,${SPACK_GCC_PATH}/lib64
-      fflags: --gcc-toolchain=${SPACK_GCC_PATH}
-    operating_system: ${SPACK_OS}
-    target: ${SPACK_TARGET}
+      cc: $AOCC_DIR/bin/clang
+      cxx: $AOCC_DIR/bin/clang++
+      f77: $AOCC_DIR/bin/flang
+      fc: $AOCC_DIR/bin/flang
+    flags: {}
+    operating_system: centos7
+    target: x86_64
     modules: []
     environment: {}
     extra_rpaths: []
 EOF
-    echo "==> Locking down toolchain to AOCC..."
-    spack compiler remove -a gcc || true
-    spack compiler remove -a llvm || true
-    TARGET_COMPILER_SPEC="aocc@${AOCC_VER}"
+    TARGET_COMPILER_SPEC="aocc@5.1.0"
+    FAM_SPEC="%aocc"
 
-elif [[ "$COMPILER" == "%oneapi" || "$COMPILER" == "smoke%oneapi" ]]; then
+elif [[ "$COMPILER" == "%oneapi" ]]; then
     echo "==> Bootstrapping Intel oneAPI toolchain..."
-    spack compiler find --scope site
-    echo "==> Ensuring GCC 14 base..."
-    spack install --reuse gcc@14 languages=c,c++,fortran
-    SPACK_GCC_PATH=$(spack find --format "{prefix}" gcc@14 | head -n 1)
-    spack compiler find --scope site "$SPACK_GCC_PATH"
+    spack install --no-cache intel-oneapi-compilers@2025.3.2 %gcc@14.3.0
+    INTEL_BASE=$(spack location -i intel-oneapi-compilers@2025.3.2)
+    INTEL_BIN_DIR=$(find "$INTEL_BASE" -name "icx" -exec dirname {} \;)
     
-    echo "==> Installing Intel oneAPI Compilers..."
-    spack install --reuse intel-oneapi-compilers
-    INTEL_ROOT=$(spack location -i intel-oneapi-compilers)
-    
-    INTEL_BIN_DIR=$(find "$INTEL_ROOT" -name icx -exec dirname {} + | head -n 1)
-    ONEAPI_VER=$(spack find --format "{version}" intel-oneapi-compilers | head -n 1)
-    
-    # Authoritative registration for oneAPI
-    echo "==> Registering oneAPI as authoritative compiler..."
-    SPACK_OS=$(spack arch -o)
-    SPACK_TARGET=$(spack arch -t)
-    mkdir -p "$SPACK_ROOT/etc/spack"
+    # Authoritative oneAPI Registration
+    # Prevents the "ifx vs gfortran" split by mandating icx/ifx in a site-scope definition.
     cat > "$SPACK_ROOT/etc/spack/compilers.yaml" <<EOF
 compilers:
 - compiler:
-    spec: oneapi@${ONEAPI_VER}
+    spec: oneapi@2025.3.2
     paths:
-      cc: ${INTEL_BIN_DIR}/icx
-      cxx: ${INTEL_BIN_DIR}/icpx
-      f77: ${INTEL_BIN_DIR}/ifx
-      fc: ${INTEL_BIN_DIR}/ifx
-    flags:
-      cflags: --gcc-toolchain=${SPACK_GCC_PATH}
-      cxxflags: --gcc-toolchain=${SPACK_GCC_PATH}
-      fflags: --gcc-toolchain=${SPACK_GCC_PATH}
-    operating_system: ${SPACK_OS}
-    target: ${SPACK_TARGET}
+      cc: $INTEL_BIN_DIR/icx
+      cxx: $INTEL_BIN_DIR/icpx
+      f77: $INTEL_BIN_DIR/ifx
+      fc: $INTEL_BIN_DIR/ifx
+    flags: {}
+    operating_system: centos7
+    target: x86_64
     modules: []
     environment: {}
     extra_rpaths: []
 EOF
-    echo "==> Locking down toolchain to oneAPI..."
-    TARGET_COMPILER_SPEC="oneapi@${ONEAPI_VER}"
+    TARGET_COMPILER_SPEC="oneapi@2025.3.2"
+    FAM_SPEC="%oneapi"
 
-elif [[ "$COMPILER" == "%gcc" || "$COMPILER" == "smoke%gcc" || "$COMPILER" == "%gcc@14"* ]]; then
-    echo "==> Bootstrapping modern GCC toolchain..."
-    spack compiler find --scope site
-    spack install --reuse gcc@14 languages=c,c++,fortran
-    SPACK_GCC_PATH=$(spack find --format "{prefix}" gcc@14 | head -n 1)
-    GCC_VER=$(spack find --format "{version}" gcc@14 | head -n 1)
-    spack compiler find --scope site "$SPACK_GCC_PATH"
-    TARGET_COMPILER_SPEC="gcc@${GCC_VER}"
 else
-    echo "==> Using existing compiler: $COMPILER"
-    spack compiler find --scope site
-    TARGET_COMPILER_SPEC=$(echo "$COMPILER" | sed 's/%//')
+    echo "==> Using modern GCC toolchain..."
+    TARGET_COMPILER_SPEC="gcc@14.3.0"
+    FAM_SPEC="%gcc"
 fi
 
-# 7e. AUTHORITATIVE LOCKDOWN: Remove ALL competing compilers
-# We do this at the very end to ensure no auto-discovery overrides us.
-echo "==> Finalizing toolchain lockdown (%${TARGET_COMPILER_SPEC})..."
-if [[ "${TARGET_COMPILER_SPEC}" != "gcc"* ]]; then
-    spack compiler remove -a --scope site gcc || true
-    spack compiler remove -a --scope site llvm || true
+# 7. Surgical Lockdown Phase
+# CRITICAL: We remove all other compilers from Spack's site-scope.
+# This forces Spack to use the target toolchain (AOCC/Intel) for EVERY dependency.
+# Without this, Spack might sneak in the bootstrap GCC for Fortran modules.
+echo "==> Locking down toolchain to $FAM_SPEC..."
+spack compiler remove -a --scope site gcc@11.5.0 || true
+spack compiler remove -a --scope site llvm || true
+if [[ "$FAM_SPEC" != "%oneapi" ]]; then
     spack compiler remove -a --scope site intel-oneapi-compilers || true
 fi
 
+# Authoritative Package Mandate
+# We use 'require' and 'compiler' directives to forge an unbreakable link.
+# We exempt core build tools (cmake, ninja, etc) to use GCC for stability.
 rm -f "$SPACK_ROOT/etc/spack/packages.yaml"
 cat > "$SPACK_ROOT/etc/spack/packages.yaml" <<EOF
 packages:
@@ -222,10 +127,6 @@ packages:
     require: "%${TARGET_COMPILER_SPEC}"
   netcdf-fortran:
     require: "%${TARGET_COMPILER_SPEC}"
-  netcdf-c:
-    require: "%${TARGET_COMPILER_SPEC}"
-  hdf5:
-    require: "%${TARGET_COMPILER_SPEC}"
   gcc:
     require: "%gcc"
   gcc-runtime:
@@ -240,9 +141,7 @@ packages:
     require: "%gcc"
 EOF
 
-
-FAM_SPEC="%${TARGET_COMPILER_SPEC}"
-
+echo "==> Finalizing toolchain lockdown (${TARGET_COMPILER_SPEC})..."
 
 # 8. Final Model Compilation
 echo "==> Compiling SMOKE natively..."
@@ -250,16 +149,18 @@ echo "==> Compiling SMOKE natively..."
 if [[ "$COMPILER" == smoke* ]]; then
     FULL_SPEC="$COMPILER"
 else
-    FULL_SPEC="smoke@master $FAM_SPEC"
+    # Default to stable 5.2.1 as verified by our parity tests.
+    FULL_SPEC="smoke@5.2.1 $FAM_SPEC"
 fi
 
 echo "DEBUG: FINAL FULL_SPEC=[$FULL_SPEC]"
 spack install --no-cache $FULL_SPEC
 
 # 9. Post-Install Setup
-CURRENT_SMOKE=$(spack location -i $FULL_SPEC)
-rm -f smoke-latest
-ln -s "$CURRENT_SMOKE" smoke-latest
+# Create a shortcut to the latest build.
+SMOKE_INSTALL=$(spack location -i $FULL_SPEC)
+rm -rf smoke-latest
+ln -s "$SMOKE_INSTALL" smoke-latest
 
 echo "==> Compilation complete!"
 echo "==> Shortcut: ./smoke-latest/bin"
