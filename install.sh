@@ -35,11 +35,21 @@ mkdir -p "$SPACK_USER_CACHE_PATH"
 INSTALL_ROOT="${PWD}/install"
 mkdir -p "$INSTALL_ROOT"
 
-# 2b. Auto-Provision Spack
+# 2b. Auto-Provision Spack Engine (v1.1.1)
 if [[ ! -d "$SPACK_ROOT" ]]; then
-    echo "==> Spack not found at $SPACK_ROOT. Cloning from GitHub..."
-    git clone -c feature.manyFiles=true https://github.com/spack/spack.git "$SPACK_ROOT" || {
-        echo "ERROR: Failed to clone Spack. Please check your internet connection."
+    echo "==> Spack not found at $SPACK_ROOT. Cloning v1.1.1..."
+    git clone -b v1.1.1 --depth 1 https://github.com/spack/spack.git "$SPACK_ROOT" || {
+        echo "ERROR: Failed to clone Spack v1.1.1."
+        exit 1
+    }
+fi
+
+# 2c. Auto-Provision Spack Packages (Required for v1.x unbundled architecture)
+PACKAGES_ROOT="${PWD}/spack-packages"
+if [[ ! -d "$PACKAGES_ROOT" ]]; then
+    echo "==> Spack packages missing. Cloning core repository..."
+    git clone --depth 1 https://github.com/spack/spack-packages.git "$PACKAGES_ROOT" || {
+        echo "ERROR: Failed to clone Spack packages."
         exit 1
     }
 fi
@@ -48,11 +58,14 @@ fi
 source "$SPACK_ROOT/share/spack/setup-env.sh"
 
 # 4. Repository Registration
-# We force-refresh the repository and clean the metadata cache to prevent
-# stale path errors (e.g., "No module named spack_repo").
 echo "==> Refreshing Spack repository registration..."
 spack clean -m
 spack repo remove smoke_v52 >/dev/null 2>&1 || true
+spack repo remove builtin >/dev/null 2>&1 || true
+
+# Register the new unbundled builtin repo
+spack repo add --scope site "${PACKAGES_ROOT}/repos/spack_repo/builtin"
+# Register our local SMOKE recipes
 spack repo add --scope site "$PWD"
 spack repo list
 
