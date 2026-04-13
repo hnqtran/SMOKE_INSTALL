@@ -7,8 +7,14 @@
 #   ./install.sh %gcc /home/user/smoke_bin  (Installs to custom location)
 
 # Set default values if arguments are missing
-COMPILER="${1:-%gcc}"
-MY_INSTALL_ROOT="${2:-$PWD/install}"
+# Smarter argument parsing to handle separate spec and compiler (e.g. smoke@5.2 %aocc)
+if [[ "$1" == smoke* && "$2" == %* ]]; then
+    COMPILER="$1 $2"
+    MY_INSTALL_ROOT="${3:-$PWD/install}"
+else
+    COMPILER="${1:-%gcc}"
+    MY_INSTALL_ROOT="${2:-$PWD/install}"
+fi
 
 # Stop on any error
 set -e
@@ -103,7 +109,7 @@ export SPACK_DISABLE_LOCAL_CONFIG=1
 # 4. Clean up configurations
 echo "==> Wiping site and local configurations..."
 mkdir -p "$SPACK_ROOT/etc/spack"
-rm -f "$SPACK_ROOT/etc/spack/packages.yaml" "$SPACK_ROOT/etc/spack/compilers.yaml" "$SPACK_ROOT/etc/spack/repos.yaml"
+rm -f "$SPACK_ROOT/etc/spack/config.yaml" "$SPACK_ROOT/etc/spack/packages.yaml" "$SPACK_ROOT/etc/spack/compilers.yaml" "$SPACK_ROOT/etc/spack/repos.yaml"
 rm -rf "$SPACK_ROOT/etc/spack/site" "$SPACK_ROOT/etc/spack/linux"
 
 # 5. Register custom and unbundled repositories
@@ -169,13 +175,13 @@ EOF
 cat <<EOF > "$SPACK_ROOT/etc/spack/config.yaml"
 config:
   install_tree:
-    root: $MY_INSTALL_ROOT
+    root: "$MY_INSTALL_ROOT"
     projections:
       all: "{name}-{version}-{compiler.name}-{hash:7}"
 EOF
 
 # 8. Bootstrap Toolchains
-if [[ "$COMPILER" == "%aocc" || "$COMPILER" == "smoke%aocc" ]]; then
+if [[ "$COMPILER" == *"%aocc"* ]]; then
     echo "==> Bootstrapping AOCC toolchain..."
     spack compiler find --scope site
     # CRITICAL SCRUB: Eject auto-generated externals that hijack the bootstrap
@@ -192,8 +198,16 @@ if [[ "$COMPILER" == "%aocc" || "$COMPILER" == "smoke%aocc" ]]; then
 
     echo "==> Installing AOCC..."
     spack install --reuse aocc+license-agreed %gcc@${GCC_VER}
-    AOCC_PATH=$(spack find --format "{prefix}" aocc %gcc@${GCC_VER} | head -n 1)
-    AOCC_VER=$(spack find --format "{version}" aocc %gcc@${GCC_VER} | head -n 1)
+
+    # Resilient detection: take the most recently installed aocc
+    AOCC_INFO=$(spack find --format "{prefix} {version}" aocc | head -n 1)
+    AOCC_PATH=$(echo $AOCC_INFO | awk '{print $1}')
+    AOCC_VER=$(echo $AOCC_INFO | awk '{print $2}')
+
+    if [[ -z "$AOCC_VER" ]]; then
+        echo "==> Error: Failed to detect AOCC version after install."
+        exit 1
+    fi
     
     SPACK_OS=$(spack arch -o)
     SPACK_TARGET=$(spack arch -t)
@@ -234,7 +248,7 @@ EOF
     # spack compiler remove -a --scope site llvm >/dev/null 2>&1 || true
     TARGET_COMPILER_SPEC="aocc@${AOCC_VER}"
 
-elif [[ "$COMPILER" == "%oneapi" || "$COMPILER" == "smoke%oneapi" || "$COMPILER" == "%intel" ]]; then
+elif [[ "$COMPILER" == *"%oneapi"* || "$COMPILER" == *"%intel"* ]]; then
     echo "==> Bootstrapping Intel oneAPI toolchain..."
     spack compiler find --scope site
     rm -f "$SPACK_ROOT/etc/spack/site/packages.yaml" "$SPACK_ROOT/etc/spack/packages.yaml"
@@ -246,10 +260,18 @@ elif [[ "$COMPILER" == "%oneapi" || "$COMPILER" == "smoke%oneapi" || "$COMPILER"
     
     echo "==> Installing Intel oneAPI Compilers..."
     spack install --reuse intel-oneapi-compilers@2025.3.2
-    INTEL_ROOT=$(spack location -i intel-oneapi-compilers)
     
+    # Resilient detection
+    INTEL_INFO=$(spack find --format "{prefix} {version}" intel-oneapi-compilers@2025.3.2 | head -n 1)
+    INTEL_ROOT=$(echo $INTEL_INFO | awk '{print $1}')
+    ONEAPI_VER=$(echo $INTEL_INFO | awk '{print $2}')
+    
+    if [[ -z "$ONEAPI_VER" ]]; then
+        echo "==> Error: Failed to detect Intel oneAPI version after install."
+        exit 1
+    fi
+
     INTEL_BIN_DIR=$(find "$INTEL_ROOT" -name icx -exec dirname {} + | head -n 1)
-    ONEAPI_VER=2025.3.2
     
     # Authoritative registration for oneAPI
     echo "==> Registering oneAPI as authoritative compiler..."
@@ -321,7 +343,12 @@ EOF
 else
     echo "==> Using existing compiler: $COMPILER"
     spack compiler find --scope site
-    TARGET_COMPILER_SPEC=$(echo "$COMPILER" | sed 's/%//')
+    # Extract only the compiler part (e.g., aocc) from a full spec (e.g., smoke@5.2 %aocc)
+    if [[ "$COMPILER" == *"%"* ]]; then
+        TARGET_COMPILER_SPEC=$(echo "$COMPILER" | sed 's/.*%//')
+    else
+        TARGET_COMPILER_SPEC="gcc"
+    fi
 fi
 
 # 9. Final Model Compilation Lockdown
@@ -419,10 +446,10 @@ else
 fi
 
 echo "DEBUG: FINAL FULL_SPEC=[$FULL_SPEC]"
-spack install --no-cache $FULL_SPEC
+spack install --no-cache "$FULL_SPEC"
 
 # 10. Post-Install Setup
-CURRENT_SMOKE=$(spack location -i $FULL_SPEC)
+CURRENT_SMOKE=$(spack location -i "$FULL_SPEC")
 rm -f smoke-latest
 ln -s "$CURRENT_SMOKE" smoke-latest
 
