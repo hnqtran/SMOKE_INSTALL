@@ -359,7 +359,7 @@ echo "==> Finalizing toolchain lockdown (%${TARGET_COMPILER_SPEC})..."
 
 rm -f "$SPACK_ROOT/etc/spack/packages.yaml"
 if [[ "$TARGET_COMPILER_SPEC" == gcc* ]]; then
-    # For GCC, we use compiler preference instead of REQUIRE to avoid circularity during bootstrap
+    # For GCC, we use strict REQUIRE for modeling stack and target portability
     cat > "$SPACK_ROOT/etc/spack/packages.yaml" <<EOF
 packages:
   all:
@@ -376,11 +376,13 @@ packages:
     require: "%${TARGET_COMPILER_SPEC}"
 EOF
 elif [[ "$TARGET_COMPILER_SPEC" == oneapi* ]]; then
-    # For Intel, we use compiler preference for modeling stack but FORCE build tools to GCC
+    # For Intel, we use strict REQUIRE for modeling stack and target portability
     cat > "$SPACK_ROOT/etc/spack/packages.yaml" <<EOF
 packages:
   all:
-    compiler: ["${TARGET_COMPILER_SPEC}"]
+    require:
+      - "%${TARGET_COMPILER_SPEC}"
+      - "target=x86_64"
     providers:
       fortran-rt: [intel-oneapi-runtime]
   ioapi:
