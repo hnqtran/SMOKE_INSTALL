@@ -121,6 +121,8 @@ spack repo add --scope site "$PWD"
 cat > "$SPACK_ROOT/etc/spack/packages.yaml" <<EOF
 packages:
   all:
+    require:
+      - "target=x86_64"
     prefer:
       - "^gcc-runtime@14"
   gcc:
@@ -174,6 +176,7 @@ EOF
 # 7. Configure install locations and naming
 cat <<EOF > "$SPACK_ROOT/etc/spack/config.yaml"
 config:
+  build_jobs: 2
   install_tree:
     root: "$MY_INSTALL_ROOT"
     projections:
@@ -360,7 +363,9 @@ if [[ "$TARGET_COMPILER_SPEC" == gcc* ]]; then
     cat > "$SPACK_ROOT/etc/spack/packages.yaml" <<EOF
 packages:
   all:
-    compiler: ["${TARGET_COMPILER_SPEC}"]
+    require:
+      - "%${TARGET_COMPILER_SPEC}"
+      - "target=x86_64"
   ioapi:
     require: "%${TARGET_COMPILER_SPEC}"
   netcdf-fortran:
@@ -419,8 +424,9 @@ else
     cat > "$SPACK_ROOT/etc/spack/packages.yaml" <<EOF
 packages:
   all:
-    require: "%${TARGET_COMPILER_SPEC}"
-    compiler: ["${TARGET_COMPILER_SPEC}"]
+    require:
+      - "%${TARGET_COMPILER_SPEC}"
+      - "target=x86_64"
   ioapi:
     require: "%${TARGET_COMPILER_SPEC}"
   netcdf-fortran:
