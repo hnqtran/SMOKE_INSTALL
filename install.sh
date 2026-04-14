@@ -55,8 +55,6 @@ setup_spack_and_repos() {
     spack repo add --scope site "${PACKAGES_ROOT}/repos/spack_repo/builtin" || true
     spack repo add --scope site "$PWD" || true
 
-    log "Configuring public binary cache..."
-    spack mirror add spack-public https://binaries.spack.io/develop || true
 }
 
 apply_intel_patches() {
@@ -100,7 +98,7 @@ EOF
     cat <<EOF > "$SPACK_ROOT/etc/spack/packages.yaml"
 packages:
   all:
-    require: ["target=x86_64"]
+    require: ["target=${SPACK_TARGET:-x86_64}"]
     prefer: ["^gcc-runtime@14"]
   gcc: {require: "%gcc"}
   gcc-runtime: {require: "%gcc"}
@@ -150,13 +148,41 @@ setup_system_gcc() {
 bootstrap_gcc_base() {
     log "Ensuring GCC 14 base toolchain..."
     spack compiler find --scope site
-    # Do NOT wipe packages.yaml here; we need target=x86_64 to remain enforced!
-    spack install --no-cache -j ${BUILD_JOBS:-1} gcc@14~bootstrap languages=c,c++,fortran
+    
+    local system_gcc=$(command -v gcc)
+    local gcc_ver=$(gcc -dumpfullversion 2>/dev/null || gcc -dumpversion)
+    local system_prefix=$(dirname $(dirname "$system_gcc"))
+    
+    log "Cleansing site configuration of package locks..."
+    python3 -c '
+import sys, yaml, os
+spack_root = sys.argv[1]; prefix = sys.argv[2]; ver = sys.argv[3]
+p = os.path.join(spack_root, "etc/spack/site/packages.yaml")
+data = {}
+if os.path.exists(p):
+    try:
+        with open(p, "r") as f: data = yaml.safe_load(f) or {}
+    except: pass
+if "packages" not in data: data["packages"] = {}
+if "gcc" in data["packages"]: del data["packages"]["gcc"]
+data["packages"]["gcc-runtime"] = {
+    "externals": [{"spec": f"gcc-runtime@{ver}", "prefix": prefix}],
+    "buildable": False
+}
+with open(p, "w") as f: yaml.dump(data, f)
+' "$SPACK_ROOT" "$system_prefix" "$gcc_ver"
+
+    # Ensure no remnant packages.yaml at root is blocking us
+    rm -f "$SPACK_ROOT/etc/spack/packages.yaml"
+    
+    log "Bootstrapping GCC 14..."
+    export TERM=dumb
+    spack --no-color install -j ${BUILD_JOBS:-1} gcc@14 languages=c,c++,fortran
     
     SPACK_GCC_PATH=$(spack find --format "{prefix}" gcc@14 | head -n 1)
     GCC_VER=$(spack find --format "{version}" gcc@14 | head -n 1)
     SPACK_OS=$(spack arch -o)
-    SPACK_TARGET="x86_64" # Enforce portability
+    SPACK_TARGET=$(spack arch -t)
 }
 
 generate_final_config() {
@@ -169,8 +195,6 @@ packages:
   all:
     require:
       - "target=x86_64"
-  smoke:
-    require: "%${target_spec}"
 EOF
 
     if [[ "$target_spec" == oneapi* ]]; then
@@ -215,6 +239,7 @@ EOF
   curl: {require: "%gcc"}
   cmake: {require: "%gcc"}
   ninja: {require: "%gcc"}
+  smoke: {require: "%${target_spec}"}
   ioapi: {require: "%${target_spec}"}
   netcdf-fortran: {require: "%${target_spec}"}
   netcdf-c: {require: "%${target_spec}"}
@@ -229,13 +254,16 @@ log "Dynamic job scaling: Set to ${BUILD_JOBS} parallel threads based on availab
 
 setup_spack_and_repos
 apply_intel_patches
-init_spack_config
-
 if [[ "$COMPILER_SPEC" == *"%oneapi"* || "$COMPILER_SPEC" == *"%intel"* ]]; then
     setup_system_gcc
 else
     bootstrap_gcc_base
 fi
+
+init_spack_config
+
+log "Configuring public binary cache for dependents..."
+spack mirror add spack-public https://binaries.spack.io/develop || true
 
 if [[ "$COMPILER_SPEC" == *"%aocc"* ]]; then
     log "Hydrating AOCC track..."
