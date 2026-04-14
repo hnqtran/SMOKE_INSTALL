@@ -1,5 +1,8 @@
 #!/bin/bash
-# SMOKE Spack Deployment Engine (Refactored)
+# SMOKE Spack Deployment Engine
+# CRITICAL: This script MUST maintain strict multi-platform support. 
+# Never assume OS-specific paths, versions, or shell behaviors. 
+# All logic must be portable and agnostic to specific Linux distributions.
 # Usage: ./install.sh [COMPILER/SPEC] [/custom/install/path]
 
 set -euo pipefail
@@ -22,7 +25,7 @@ log() { echo "==> $1"; }
 
 get_safe_build_jobs() {
     local jobs=$(awk '/MemAvailable/ {printf "%.0f", $2 / 1024 / 1024 / 2}' /proc/meminfo 2>/dev/null)
-    local cores=$(nproc 2>/dev/null || echo 1)
+    local cores=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
     
     [[ -z "$jobs" ]] && jobs=2
     [[ $jobs -lt 1 ]] && jobs=1
@@ -148,7 +151,7 @@ bootstrap_gcc_base() {
     log "Ensuring GCC 14 base toolchain..."
     spack compiler find --scope site
     # Do NOT wipe packages.yaml here; we need target=x86_64 to remain enforced!
-    spack install -j ${BUILD_JOBS:-1} --reuse gcc@14~bootstrap~lto~multilib languages=c,c++,fortran
+    spack install --no-cache -j ${BUILD_JOBS:-1} gcc@14~bootstrap languages=c,c++,fortran
     
     SPACK_GCC_PATH=$(spack find --format "{prefix}" gcc@14 | head -n 1)
     GCC_VER=$(spack find --format "{version}" gcc@14 | head -n 1)
@@ -165,8 +168,9 @@ generate_final_config() {
 packages:
   all:
     require:
-      - "%$target_spec"
       - "target=x86_64"
+  smoke:
+    require: "%${target_spec}"
 EOF
 
     if [[ "$target_spec" == oneapi* ]]; then
