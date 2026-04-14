@@ -21,12 +21,13 @@ PACKAGES_ROOT="${PWD}/spack-packages"
 log() { echo "==> $1"; }
 
 get_safe_build_jobs() {
-    # Reserve roughly 2GB per thread. Output result directly as a number.
-    local jobs=$(awk '/MemAvailable/ {printf "%.0f", $2 / 1024 / 1024 / 2}' /proc/meminfo)
+    local jobs=$(awk '/MemAvailable/ {printf "%.0f", $2 / 1024 / 1024 / 2}' /proc/meminfo 2>/dev/null)
     local cores=$(nproc 2>/dev/null || echo 1)
     
+    [[ -z "$jobs" ]] && jobs=2
     [[ $jobs -lt 1 ]] && jobs=1
     [[ $jobs -gt $cores ]] && jobs=$cores
+    log "Debug: Calculated jobs=$jobs (Cores: $cores)" >&2
     echo $jobs
 }
 
@@ -147,7 +148,7 @@ bootstrap_gcc_base() {
     log "Ensuring GCC 14 base toolchain..."
     spack compiler find --scope site
     # Do NOT wipe packages.yaml here; we need target=x86_64 to remain enforced!
-    spack install -j ${BUILD_JOBS} --reuse gcc@14~bootstrap~lto~multilib languages=c,c++,fortran
+    spack install -j ${BUILD_JOBS:-1} --reuse gcc@14~bootstrap~lto~multilib languages=c,c++,fortran
     
     SPACK_GCC_PATH=$(spack find --format "{prefix}" gcc@14 | head -n 1)
     GCC_VER=$(spack find --format "{version}" gcc@14 | head -n 1)
@@ -172,8 +173,8 @@ EOF
         cat <<EOF >> "$SPACK_ROOT/etc/spack/packages.yaml"
     providers:
       fortran-rt: [intel-oneapi-runtime]
-  intel-oneapi-compilers: {require: "@${ONEAPI_VER:-} %gcc@${GCC_VER}"}
-  intel-oneapi-runtime:   {require: "@${ONEAPI_VER:-} %gcc@${GCC_VER}"}
+  intel-oneapi-compilers: {require: "@${ONEAPI_VER:-}"}
+  intel-oneapi-runtime:   {require: "@${ONEAPI_VER:-}"}
   gcc:
     externals: [{spec: "gcc@${GCC_VER}", prefix: "${SPACK_GCC_PATH}"}]
     buildable: false
@@ -234,7 +235,7 @@ fi
 
 if [[ "$COMPILER_SPEC" == *"%aocc"* ]]; then
     log "Hydrating AOCC track..."
-    spack install -j ${BUILD_JOBS} --reuse aocc+license-agreed %gcc@${GCC_VER}
+    spack install -j ${BUILD_JOBS:-1} --reuse aocc+license-agreed %gcc@${GCC_VER}
     AOCC_INFO=$(spack find --format "{prefix} {version}" aocc | head -n 1)
     AOCC_PATH=$(echo $AOCC_INFO | awk "{print \$1}")
     AOCC_VER=$(echo $AOCC_INFO | awk "{print \$2}")
@@ -264,7 +265,7 @@ EOF
 
 elif [[ "$COMPILER_SPEC" == *"%oneapi"* || "$COMPILER_SPEC" == *"%intel"* ]]; then
     log "Hydrating Intel oneAPI track..."
-    spack install -j ${BUILD_JOBS} --reuse intel-oneapi-compilers@2025.3.2 "%gcc@${GCC_VER}"
+    spack install -j ${BUILD_JOBS:-1} --reuse intel-oneapi-compilers@2025.3.2
     INTEL_INFO=$(spack find --format "{prefix} {version}" intel-oneapi-compilers@2025.3.2 | head -n 1)
     INTEL_ROOT=$(echo $INTEL_INFO | awk "{print \$1}")
     ONEAPI_VER=$(echo $INTEL_INFO | awk "{print \$2}")
