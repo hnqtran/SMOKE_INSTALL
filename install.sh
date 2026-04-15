@@ -182,20 +182,6 @@ with open(p, 'w') as f: yaml.dump(data, f)
     
     SPACK_GCC_PATH=$(spack find --format "{prefix}" gcc@14 | head -n 1)
     GCC_VER=$(spack find --format "{version}" gcc@14 | head -n 1)
-    
-    log "Finalizing GCC 14 handover..."
-    # Require our new compiler for everything to maintain strict portability
-    cat <<EOF > "$SPACK_ROOT/etc/spack/site/packages.yaml"
-packages:
-  all:
-    require: "%gcc@14"
-EOF
-
-    log "Formally registering GCC 14 compiler..."
-    spack compiler find --scope site "$SPACK_GCC_PATH"
-
-    SPACK_OS=$(spack arch -o)
-    SPACK_TARGET=$(spack arch -t)
 }
 
 generate_final_config() {
@@ -207,7 +193,7 @@ generate_final_config() {
 packages:
   all:
     require:
-      - "target=${SPACK_TARGET:-x86_64}"
+      - "target=${SPACK_TARGET}"
 EOF
 
     if [[ "$target_spec" == oneapi* ]]; then
@@ -225,33 +211,35 @@ EOF
 EOF
     elif [[ "$target_spec" != gcc* ]]; then
         cat <<EOF >> "$SPACK_ROOT/etc/spack/packages.yaml"
-  gcc: {require: "%gcc@14"}
-  gcc-runtime: {require: "%gcc@14"}
+  gcc:
+    prefer: ["%gcc@14"]
+  gcc-runtime:
+    prefer: ["%gcc@14"]
 EOF
     fi
 
     cat <<EOF >> "$SPACK_ROOT/etc/spack/packages.yaml"
-  binutils: {require: "%gcc"}
-  gmake: {require: "%gcc"}
-  pkgconf: {require: "%gcc"}
-  m4: {require: "%gcc"}
-  autoconf: {require: "%gcc"}
-  automake: {require: "%gcc"}
-  libtool: {require: "%gcc"}
-  findutils: {require: "%gcc"}
-  texinfo: {require: "%gcc"}
-  diffutils: {require: "%gcc"}
-  sed: {require: "%gcc"}
-  libiconv: {require: "%gcc"}
-  xz: {require: "%gcc"}
-  zstd: {require: "%gcc"}
-  berkeley-db: {require: "%gcc"}
-  ncurses: {require: "%gcc"}
-  perl: {require: "%gcc"}
-  openssl: {require: "%gcc"}
-  curl: {require: "%gcc"}
-  cmake: {require: "%gcc"}
-  ninja: {require: "%gcc"}
+  binutils: {prefer: ["%gcc"]}
+  gmake: {prefer: ["%gcc"]}
+  pkgconf: {prefer: ["%gcc"]}
+  m4: {prefer: ["%gcc"]}
+  autoconf: {prefer: ["%gcc"]}
+  automake: {prefer: ["%gcc"]}
+  libtool: {prefer: ["%gcc"]}
+  findutils: {prefer: ["%gcc"]}
+  texinfo: {prefer: ["%gcc"]}
+  diffutils: {prefer: ["%gcc"]}
+  sed: {prefer: ["%gcc"]}
+  libiconv: {prefer: ["%gcc"]}
+  xz: {prefer: ["%gcc"]}
+  zstd: {prefer: ["%gcc"]}
+  berkeley-db: {prefer: ["%gcc"]}
+  ncurses: {prefer: ["%gcc"]}
+  perl: {prefer: ["%gcc"]}
+  openssl: {prefer: ["%gcc"]}
+  curl: {prefer: ["%gcc"]}
+  cmake: {prefer: ["%gcc"]}
+  ninja: {prefer: ["%gcc"]}
   smoke: {require: "%${target_spec}"}
   ioapi: {require: "%${target_spec}"}
   netcdf-fortran: {require: "%${target_spec}"}
@@ -266,6 +254,13 @@ BUILD_JOBS=$(get_safe_build_jobs)
 log "Dynamic job scaling: Set to ${BUILD_JOBS} parallel threads based on available memory."
 
 setup_spack_and_repos
+export PATH="$SPACK_ROOT/bin:$PATH"
+
+log "Detecting native system architecture..."
+export SPACK_TARGET=$(spack arch -t)
+export SPACK_OS=$(spack arch -o)
+log "Target: ${SPACK_TARGET} | OS: ${SPACK_OS}"
+
 apply_intel_patches
 if [[ "$COMPILER_SPEC" == *"%oneapi"* || "$COMPILER_SPEC" == *"%intel"* ]]; then
     setup_system_gcc
