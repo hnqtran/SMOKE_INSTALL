@@ -55,6 +55,10 @@ setup_spack_and_repos() {
     spack repo add --scope site "${PACKAGES_ROOT}/repos/spack_repo/builtin" || true
     spack repo add --scope site "$PWD" || true
 
+    log "Sanitizing mirror configuration..."
+    for m in $(spack mirror list | grep -v "==>" | awk "{print \$1}"); do
+        spack mirror remove "$m" || true
+    done
 }
 
 apply_intel_patches() {
@@ -100,8 +104,6 @@ packages:
   all:
     require: ["target=${SPACK_TARGET:-x86_64}"]
     prefer: ["^gcc-runtime@14"]
-  gcc: {require: "%gcc"}
-  gcc-runtime: {require: "%gcc"}
   binutils: {require: "%gcc"}
   gmake: {require: "%gcc"}
   pkgconf: {require: "%gcc"}
@@ -154,33 +156,44 @@ bootstrap_gcc_base() {
     local system_prefix=$(dirname $(dirname "$system_gcc"))
     
     log "Cleansing site configuration of package locks..."
-    python3 -c '
+    python3 -c "
 import sys, yaml, os
 spack_root = sys.argv[1]; prefix = sys.argv[2]; ver = sys.argv[3]
-p = os.path.join(spack_root, "etc/spack/site/packages.yaml")
-data = {}
+p = os.path.join(spack_root, 'etc/spack/site/packages.yaml')
+data = {'packages': {}}
 if os.path.exists(p):
     try:
-        with open(p, "r") as f: data = yaml.safe_load(f) or {}
+        with open(p, 'r') as f: data = yaml.safe_load(f) or {'packages': {}}
     except: pass
-if "packages" not in data: data["packages"] = {}
-if "gcc" in data["packages"]: del data["packages"]["gcc"]
-data["packages"]["gcc-runtime"] = {
-    "externals": [{"spec": f"gcc-runtime@{ver}", "prefix": prefix}],
-    "buildable": False
+if 'packages' not in data: data['packages'] = {}
+data['packages']['gcc-runtime'] = {
+    'externals': [{'spec': f'gcc-runtime@{ver}', 'prefix': prefix}],
+    'buildable': False
 }
-with open(p, "w") as f: yaml.dump(data, f)
-' "$SPACK_ROOT" "$system_prefix" "$gcc_ver"
+with open(p, 'w') as f: yaml.dump(data, f)
+" "$SPACK_ROOT" "$system_prefix" "$gcc_ver"
 
     # Ensure no remnant packages.yaml at root is blocking us
     rm -f "$SPACK_ROOT/etc/spack/packages.yaml"
     
     log "Bootstrapping GCC 14..."
     export TERM=dumb
-    spack --no-color install -j ${BUILD_JOBS:-1} gcc@14 languages=c,c++,fortran
+    spack --no-color install -j ${BUILD_JOBS:-1} gcc@14 languages=c,c++,fortran < /dev/null
     
     SPACK_GCC_PATH=$(spack find --format "{prefix}" gcc@14 | head -n 1)
     GCC_VER=$(spack find --format "{version}" gcc@14 | head -n 1)
+    
+    log "Finalizing GCC 14 handover..."
+    # Require our new compiler for everything to maintain strict portability
+    cat <<EOF > "$SPACK_ROOT/etc/spack/site/packages.yaml"
+packages:
+  all:
+    require: "%gcc@14"
+EOF
+
+    log "Formally registering GCC 14 compiler..."
+    spack compiler find --scope site "$SPACK_GCC_PATH"
+
     SPACK_OS=$(spack arch -o)
     SPACK_TARGET=$(spack arch -t)
 }
@@ -194,7 +207,7 @@ generate_final_config() {
 packages:
   all:
     require:
-      - "target=x86_64"
+      - "target=${SPACK_TARGET:-x86_64}"
 EOF
 
     if [[ "$target_spec" == oneapi* ]]; then
@@ -262,12 +275,9 @@ fi
 
 init_spack_config
 
-log "Configuring public binary cache for dependents..."
-spack mirror add spack-public https://binaries.spack.io/develop || true
-
 if [[ "$COMPILER_SPEC" == *"%aocc"* ]]; then
     log "Hydrating AOCC track..."
-    spack install -j ${BUILD_JOBS:-1} --reuse aocc+license-agreed %gcc@${GCC_VER}
+    spack install --no-cache -j ${BUILD_JOBS:-1} aocc+license-agreed %gcc@${GCC_VER} < /dev/null
     AOCC_INFO=$(spack find --format "{prefix} {version}" aocc | head -n 1)
     AOCC_PATH=$(echo $AOCC_INFO | awk "{print \$1}")
     AOCC_VER=$(echo $AOCC_INFO | awk "{print \$2}")
@@ -297,7 +307,7 @@ EOF
 
 elif [[ "$COMPILER_SPEC" == *"%oneapi"* || "$COMPILER_SPEC" == *"%intel"* ]]; then
     log "Hydrating Intel oneAPI track..."
-    spack install -j ${BUILD_JOBS:-1} --reuse intel-oneapi-compilers@2025.3.2
+    spack install -j ${BUILD_JOBS:-1} --reuse intel-oneapi-compilers@2025.3.2 < /dev/null
     INTEL_INFO=$(spack find --format "{prefix} {version}" intel-oneapi-compilers@2025.3.2 | head -n 1)
     INTEL_ROOT=$(echo $INTEL_INFO | awk "{print \$1}")
     ONEAPI_VER=$(echo $INTEL_INFO | awk "{print \$2}")
@@ -337,7 +347,7 @@ generate_final_config "$TARGET_SPEC"
 # --- 4. Final Installation ---
 if [[ "$COMPILER_SPEC" == smoke* ]]; then FULL_SPEC="$COMPILER_SPEC"; else FULL_SPEC="smoke@master %$TARGET_SPEC"; fi
 log "Compiling SMOKE natively: $FULL_SPEC"
-spack install --no-cache "$FULL_SPEC"
+spack install --no-cache "$FULL_SPEC" < /dev/null
 
 CURRENT_SMOKE=$(spack location -i "$FULL_SPEC")
 rm -f smoke-latest && ln -s "$CURRENT_SMOKE" smoke-latest
