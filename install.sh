@@ -104,6 +104,7 @@ EOF
 packages:
   all:
     require: ["target=${SPACK_TARGET:-x86_64}"]
+    prefer: ["^gcc-runtime@14"]
   binutils: {require: "%gcc"}
   gmake: {require: "%gcc"}
   pkgconf: {require: "%gcc"}
@@ -166,6 +167,10 @@ if os.path.exists(p):
         with open(p, 'r') as f: data = yaml.safe_load(f) or {'packages': {}}
     except: pass
 if 'packages' not in data: data['packages'] = {}
+data['packages']['gcc-runtime'] = {
+    'externals': [{'spec': f'gcc-runtime@{ver}', 'prefix': prefix}],
+    'buildable': False
+}
 with open(p, 'w') as f: yaml.dump(data, f)
 " "$SPACK_ROOT" "$system_prefix" "$gcc_ver"
 
@@ -190,6 +195,9 @@ packages:
       - "target=${SPACK_TARGET}"
   gcc:
     externals: [{spec: "gcc@${GCC_VER}", prefix: "${SPACK_GCC_PATH}"}]
+    buildable: false
+  gcc-runtime:
+    externals: [{spec: "gcc-runtime@${GCC_VER}", prefix: "${SPACK_GCC_PATH}"}]
     buildable: false
 EOF
 }
@@ -216,29 +224,15 @@ EOF
       fortran-rt: [intel-oneapi-runtime]
   intel-oneapi-compilers: {require: "@${ONEAPI_VER:-}"}
   intel-oneapi-runtime:   {require: "@${ONEAPI_VER:-}"}
-  gcc:
-    externals: [{spec: "gcc@${GCC_VER}", prefix: "${SPACK_GCC_PATH}"}]
-    buildable: false
-  gcc:
-    externals: [{spec: "gcc@${GCC_VER}", prefix: "${SPACK_GCC_PATH}"}]
-    buildable: false
 EOF
     elif [[ "$target_spec" != gcc* ]]; then
         cat <<EOF >> "$SPACK_ROOT/etc/spack/packages.yaml"
   gcc:
     externals: [{spec: "gcc@${GCC_VER}", prefix: "${SPACK_GCC_PATH}"}]
     buildable: false
-EOF
-    else
-        cat <<EOF >> "$SPACK_ROOT/etc/spack/packages.yaml"
-  gcc:
-    externals: [{spec: "gcc@${GCC_VER}", prefix: "${SPACK_GCC_PATH}"}]
+  gcc-runtime:
+    externals: [{spec: "gcc-runtime@${GCC_VER}", prefix: "${SPACK_GCC_PATH}"}]
     buildable: false
-  smoke: {require: "%gcc@${GCC_VER}"}
-  ioapi: {require: "%gcc@${GCC_VER}"}
-  netcdf-fortran: {require: "%gcc@${GCC_VER}"}
-  netcdf-c: {require: "%gcc@${GCC_VER}"}
-  hdf5: {require: "%gcc@${GCC_VER}"}
 EOF
     fi
 
@@ -264,6 +258,11 @@ EOF
   curl: {prefer: ["%gcc"]}
   cmake: {prefer: ["%gcc"]}
   ninja: {prefer: ["%gcc"]}
+  smoke: {require: "%${target_spec}"}
+  ioapi: {require: "%${target_spec}"}
+  netcdf-fortran: {require: "%${target_spec}"}
+  netcdf-c: {require: "%${target_spec}"}
+  hdf5: {require: "%${target_spec}"}
 EOF
 }
 
