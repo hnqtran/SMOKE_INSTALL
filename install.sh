@@ -351,12 +351,14 @@ elif [[ "$COMPILER_SPEC" == *"%oneapi"* || "$COMPILER_SPEC" == *"%intel"* ]]; th
     INTEL_INFO=$(spack find --format "{prefix} {version}" intel-oneapi-compilers@2025.3.2 | head -n 1)
     INTEL_ROOT=$(echo $INTEL_INFO | awk "{print \$1}")
     ONEAPI_VER=$(echo $INTEL_INFO | awk "{print \$2}")
+    INTEL_COMP_NAME="intel-oneapi-compilers"
     INTEL_BIN_DIR=$(find "$INTEL_ROOT" -name icx -exec dirname {} + | head -n 1)
+    spack compiler find --scope site "$INTEL_BIN_DIR" || true
 
     cat > "$SPACK_ROOT/etc/spack/compilers.yaml" <<EOF
 compilers:
 - compiler:
-    spec: oneapi@${ONEAPI_VER}
+    spec: ${INTEL_COMP_NAME}@${ONEAPI_VER}
     paths: {cc: ${INTEL_BIN_DIR}/icx, cxx: ${INTEL_BIN_DIR}/icpx, f77: ${INTEL_BIN_DIR}/ifx, fc: ${INTEL_BIN_DIR}/ifx}
     flags: 
       cflags: --gcc-toolchain=${SPACK_GCC_PATH} -Wl,-rpath,${SPACK_GCC_PATH}/lib64
@@ -370,7 +372,7 @@ compilers:
     operating_system: ${SPACK_OS}
     target: ${SPACK_TARGET}
 EOF
-    TARGET_SPEC="oneapi@${ONEAPI_VER}"
+    TARGET_SPEC="${INTEL_COMP_NAME}@${ONEAPI_VER}"
 
 else
     log "Using modern GCC track..."
