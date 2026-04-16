@@ -59,6 +59,7 @@ setup_spack_and_repos() {
     for m in $(spack mirror list | grep -v "==>" | awk "{print \$1}"); do
         spack mirror remove "$m" || true
     done
+    spack clean -m || true
 }
 
 apply_intel_patches() {
@@ -103,7 +104,6 @@ EOF
 packages:
   all:
     require: ["target=${SPACK_TARGET:-x86_64}"]
-    prefer: ["^gcc-runtime@14"]
   binutils: {require: "%gcc"}
   gmake: {require: "%gcc"}
   pkgconf: {require: "%gcc"}
@@ -166,10 +166,6 @@ if os.path.exists(p):
         with open(p, 'r') as f: data = yaml.safe_load(f) or {'packages': {}}
     except: pass
 if 'packages' not in data: data['packages'] = {}
-data['packages']['gcc-runtime'] = {
-    'externals': [{'spec': f'gcc-runtime@{ver}', 'prefix': prefix}],
-    'buildable': False
-}
 with open(p, 'w') as f: yaml.dump(data, f)
 " "$SPACK_ROOT" "$system_prefix" "$gcc_ver"
 
@@ -180,13 +176,31 @@ with open(p, 'w') as f: yaml.dump(data, f)
     export TERM=dumb
     spack --no-color install -j ${BUILD_JOBS:-1} gcc@14 languages=c,c++,fortran < /dev/null
     
-    SPACK_GCC_PATH=$(spack find --format "{prefix}" gcc@14 | head -n 1)
-    GCC_VER=$(spack find --format "{version}" gcc@14 | head -n 1)
+    export SPACK_GCC_PATH=$(spack find --format "{prefix}" gcc@14 | head -n 1)
+    export GCC_VER=$(spack find --format "{version}" gcc@14 | head -n 1)
+}
+
+lock_gcc_foundation() {
+    log "Locking foundational GCC 14 toolchain..."
+    mkdir -p "$SPACK_ROOT/etc/spack"
+    cat > "$SPACK_ROOT/etc/spack/packages.yaml" <<EOF
+packages:
+  all:
+    require:
+      - "target=${SPACK_TARGET}"
+  gcc:
+    externals: [{spec: "gcc@${GCC_VER}", prefix: "${SPACK_GCC_PATH}"}]
+    buildable: false
+EOF
 }
 
 generate_final_config() {
     local target_spec="$1"
     log "Finalizing toolchain lockdown for %$target_spec..."
+    
+    # Formally register the bootstrap compiler so Spack can use it natively
+    spack compiler find --scope site "$SPACK_GCC_PATH" || true
+
     rm -f "$SPACK_ROOT/etc/spack/packages.yaml"
     
     cat <<EOF > "$SPACK_ROOT/etc/spack/packages.yaml"
@@ -205,16 +219,26 @@ EOF
   gcc:
     externals: [{spec: "gcc@${GCC_VER}", prefix: "${SPACK_GCC_PATH}"}]
     buildable: false
-  gcc-runtime:
-    externals: [{spec: "gcc-runtime@${GCC_VER}", prefix: "${SPACK_GCC_PATH}"}]
+  gcc:
+    externals: [{spec: "gcc@${GCC_VER}", prefix: "${SPACK_GCC_PATH}"}]
     buildable: false
 EOF
     elif [[ "$target_spec" != gcc* ]]; then
         cat <<EOF >> "$SPACK_ROOT/etc/spack/packages.yaml"
   gcc:
-    prefer: ["%gcc@14"]
-  gcc-runtime:
-    prefer: ["%gcc@14"]
+    externals: [{spec: "gcc@${GCC_VER}", prefix: "${SPACK_GCC_PATH}"}]
+    buildable: false
+EOF
+    else
+        cat <<EOF >> "$SPACK_ROOT/etc/spack/packages.yaml"
+  gcc:
+    externals: [{spec: "gcc@${GCC_VER}", prefix: "${SPACK_GCC_PATH}"}]
+    buildable: false
+  smoke: {require: "%gcc@${GCC_VER}"}
+  ioapi: {require: "%gcc@${GCC_VER}"}
+  netcdf-fortran: {require: "%gcc@${GCC_VER}"}
+  netcdf-c: {require: "%gcc@${GCC_VER}"}
+  hdf5: {require: "%gcc@${GCC_VER}"}
 EOF
     fi
 
@@ -240,11 +264,6 @@ EOF
   curl: {prefer: ["%gcc"]}
   cmake: {prefer: ["%gcc"]}
   ninja: {prefer: ["%gcc"]}
-  smoke: {require: "%${target_spec}"}
-  ioapi: {require: "%${target_spec}"}
-  netcdf-fortran: {require: "%${target_spec}"}
-  netcdf-c: {require: "%${target_spec}"}
-  hdf5: {require: "%${target_spec}"}
 EOF
 }
 
@@ -261,7 +280,31 @@ export SPACK_TARGET=$(spack arch -t)
 export SPACK_OS=$(spack arch -o)
 log "Target: ${SPACK_TARGET} | OS: ${SPACK_OS}"
 
-apply_intel_patches
+# Deterministic Toolchain Discovery
+if spack find gcc@14 >/dev/null 2>&1; then
+    log "Found indigenous GCC 14 foundation. Locking paths..."
+    export SPACK_GCC_PATH=$(spack find --format "{prefix}" gcc@14 | head -n 1)
+    export GCC_VER=$(spack find --format "{version}" gcc@14 | head -n 1)
+    
+    # Surgical Registration: Tell Spack about this compiler IMMEDIATELY
+    mkdir -p "$SPACK_ROOT/etc/spack"
+    cat > "$SPACK_ROOT/etc/spack/compilers.yaml" <<EOF
+compilers:
+- compiler:
+    spec: gcc@${GCC_VER}
+    paths:
+      cc: ${SPACK_GCC_PATH}/bin/gcc
+      cxx: ${SPACK_GCC_PATH}/bin/g++
+      f77: ${SPACK_GCC_PATH}/bin/gfortran
+      fc: ${SPACK_GCC_PATH}/bin/gfortran
+    flags: {}
+    operating_system: ${SPACK_OS}
+    target: ${SPACK_TARGET}
+    modules: []
+    environment: {}
+    extra_rpaths: []
+EOF
+fi
 if [[ "$COMPILER_SPEC" == *"%oneapi"* || "$COMPILER_SPEC" == *"%intel"* ]]; then
     setup_system_gcc
 else
@@ -271,6 +314,7 @@ fi
 init_spack_config
 
 if [[ "$COMPILER_SPEC" == *"%aocc"* ]]; then
+    lock_gcc_foundation
     log "Hydrating AOCC track..."
     spack install --no-cache -j ${BUILD_JOBS:-1} aocc+license-agreed %gcc@${GCC_VER} < /dev/null
     AOCC_INFO=$(spack find --format "{prefix} {version}" aocc | head -n 1)
@@ -287,9 +331,9 @@ compilers:
       f77: ${AOCC_PATH}/bin/flang
       fc: ${AOCC_PATH}/bin/flang
     flags:
-      cflags: --gcc-toolchain=${SPACK_GCC_PATH}
+      cflags: --gcc-toolchain=${SPACK_GCC_PATH} -Wl,-rpath,${SPACK_GCC_PATH}/lib64
       cxxflags: --gcc-toolchain=${SPACK_GCC_PATH} -Wl,-rpath,${SPACK_GCC_PATH}/lib64
-      fflags: --gcc-toolchain=${SPACK_GCC_PATH}
+      fflags: --gcc-toolchain=${SPACK_GCC_PATH} -Wl,-rpath,${SPACK_GCC_PATH}/lib64
     operating_system: ${SPACK_OS}
     target: ${SPACK_TARGET}
 - compiler:
@@ -301,6 +345,8 @@ EOF
     TARGET_SPEC="aocc@${AOCC_VER}"
 
 elif [[ "$COMPILER_SPEC" == *"%oneapi"* || "$COMPILER_SPEC" == *"%intel"* ]]; then
+    apply_intel_patches
+    lock_gcc_foundation
     log "Hydrating Intel oneAPI track..."
     spack install -j ${BUILD_JOBS:-1} --reuse intel-oneapi-compilers@2025.3.2 < /dev/null
     INTEL_INFO=$(spack find --format "{prefix} {version}" intel-oneapi-compilers@2025.3.2 | head -n 1)
@@ -313,7 +359,10 @@ compilers:
 - compiler:
     spec: oneapi@${ONEAPI_VER}
     paths: {cc: ${INTEL_BIN_DIR}/icx, cxx: ${INTEL_BIN_DIR}/icpx, f77: ${INTEL_BIN_DIR}/ifx, fc: ${INTEL_BIN_DIR}/ifx}
-    flags: {cflags: --gcc-toolchain=${SPACK_GCC_PATH}, cxxflags: --gcc-toolchain=${SPACK_GCC_PATH}, fflags: --gcc-toolchain=${SPACK_GCC_PATH}}
+    flags: 
+      cflags: --gcc-toolchain=${SPACK_GCC_PATH} -Wl,-rpath,${SPACK_GCC_PATH}/lib64
+      cxxflags: --gcc-toolchain=${SPACK_GCC_PATH} -Wl,-rpath,${SPACK_GCC_PATH}/lib64
+      fflags: --gcc-toolchain=${SPACK_GCC_PATH} -Wl,-rpath,${SPACK_GCC_PATH}/lib64
     operating_system: ${SPACK_OS}
     target: ${SPACK_TARGET}
 - compiler:
