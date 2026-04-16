@@ -11,13 +11,16 @@ set -euo pipefail
 if [[ "${1:-}" == smoke* && "${2:-}" == %* ]]; then
     COMPILER_SPEC="$1 $2"
     MY_INSTALL_ROOT="${3:-$PWD/install}"
+    [[ "$MY_INSTALL_ROOT" != /* ]] && MY_INSTALL_ROOT="$PWD/$MY_INSTALL_ROOT"
 else
     COMPILER_SPEC="${1:-%gcc}"
     MY_INSTALL_ROOT="${2:-$PWD/install}"
+    [[ "$MY_INSTALL_ROOT" != /* ]] && MY_INSTALL_ROOT="$PWD/$MY_INSTALL_ROOT"
 fi
 
 export SPACK_ROOT="$PWD/spack"
 PACKAGES_ROOT="${PWD}/spack-packages"
+BUILD_STATIC="${BUILD_STATIC:-0}"
 
 # --- 2. Helper Functions ---
 
@@ -91,6 +94,12 @@ for fpath in sys.argv[1:]:
 }
 
 init_spack_config() {
+    local STATIC_SPEC="variants: [+shared, ~static]"
+    if [[ "$BUILD_STATIC" == "1" ]]; then
+        log "Enforcing strictly static toolchain (portable mode)..."
+        STATIC_SPEC="variants: [~shared, +static]"
+    fi
+
     cat <<EOF > "$SPACK_ROOT/etc/spack/config.yaml"
 config:
   build_jobs: ${BUILD_JOBS}
@@ -103,6 +112,7 @@ EOF
     cat <<EOF > "$SPACK_ROOT/etc/spack/packages.yaml"
 packages:
   all:
+    ${STATIC_SPEC}
     require: ["target=${SPACK_TARGET:-x86_64}"]
     prefer: ["^gcc-runtime@14"]
   binutils: {require: "%gcc"}
@@ -347,8 +357,10 @@ elif [[ "$COMPILER_SPEC" == *"%oneapi"* || "$COMPILER_SPEC" == *"%intel"* ]]; th
     apply_intel_patches
     lock_gcc_foundation
     log "Hydrating Intel oneAPI track..."
-    spack install -j ${BUILD_JOBS:-1} --reuse intel-oneapi-compilers@2025.3.2 < /dev/null
-    INTEL_INFO=$(spack find --format "{prefix} {version}" intel-oneapi-compilers@2025.3.2 | head -n 1)
+    INTEL_REQ_VER=$(echo "$COMPILER_SPEC" | sed -n 's/.*%[a-z0-9\-]*@\([^ ]*\).*/\1/p')
+    INTEL_REQ_VER="${INTEL_REQ_VER:-2025.3.2}"
+    spack install -j ${BUILD_JOBS:-1} --reuse intel-oneapi-compilers@${INTEL_REQ_VER} < /dev/null
+    INTEL_INFO=$(spack find --format "{prefix} {version}" intel-oneapi-compilers@${INTEL_REQ_VER} | head -n 1)
     INTEL_ROOT=$(echo $INTEL_INFO | awk "{print \$1}")
     ONEAPI_VER=$(echo $INTEL_INFO | awk "{print \$2}")
     INTEL_COMP_NAME="intel-oneapi-compilers"
