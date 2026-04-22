@@ -28,7 +28,6 @@ class Gcc(AutotoolsPackage):
     provides("c", when="languages=c")
     provides("cxx", when="languages=c++")
     provides("fortran", when="languages=fortran")
-    provides("c", "cxx", "fortran")
 
     depends_on("gmp")
     depends_on("mpfr")

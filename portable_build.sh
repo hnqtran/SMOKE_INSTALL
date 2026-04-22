@@ -31,10 +31,50 @@ log() { echo "==> [PORTABLE] $1"; }
 
 if [ ! -f "$IMAGE" ]; then
     log "Golden Base Image ($IMAGE) not found."
-    log "Generating Apptainer definition for spack/${OS_VERSION}..."
-    sed "s|{{OS_VERSION}}|${OS_VERSION}|g" smoke_foundation.def.template > "$DEF_FILE"
     
-    log "Initiating first-time automated build (this will take ~30 mins)..."
+    CACHE_DIR="$PWD/.foundation_cache"
+    
+    if [ ! -d "$CACHE_DIR/spack" ]; then
+        log "Step 1: Hydrating foundation toolchain into external root ($CACHE_DIR)..."
+        mkdir -p "$CACHE_DIR"
+        
+        # We use apptainer exec (without --writable) to bypass cluster mount restrictions.
+        # This compiles the toolchain inside Rocky 8 but stores the result on the RHEL 9 host.
+        apptainer exec --bind .:/build --bind "$CACHE_DIR:/opt/smoke_foundation" docker://spack/${OS_VERSION} /bin/bash -c "
+            set -e
+            export LC_ALL=C
+            export PATH=/usr/bin:/usr/local/bin:\$PATH
+            cd /build
+            
+            echo '==> [CONTAINER] Initiating GCC Foundation Cache...'
+            cp install_gcc.sh /tmp/install_gcc_foundation.sh
+            sed -i '/# Re-resolve paths if already installed/,\$d' /tmp/install_gcc_foundation.sh
+            
+            /tmp/install_gcc_foundation.sh \"\" \"/opt/smoke_foundation\"
+            
+            echo '==> [CONTAINER] Caching Heavy Build Tools...'
+            # Ensure the newly built Spack is in PATH
+            export PATH=\"/opt/smoke_foundation/spack/bin:\$PATH\"
+            spack install cmake autoconf automake m4 pkgconf %gcc@14 target=${SPACK_TARGET:-x86_64}
+        "
+    else
+        log "Step 1 (Skipped): Existing foundation cache detected."
+    fi
+    
+    log "Step 2: Packaging Golden Image ($IMAGE)..."
+    cat <<EOF > "$DEF_FILE"
+Bootstrap: docker
+From: spack/${OS_VERSION}
+
+%files
+    $CACHE_DIR /opt/smoke_foundation
+
+%environment
+    export SPACK_ROOT=/opt/smoke_foundation/spack
+    export PACKAGES_ROOT=/opt/smoke_foundation/spack-packages
+EOF
+
+    # Standard build will safely ingest the compiled host directory
     apptainer build "$IMAGE" "$DEF_FILE"
 else
     log "Golden Base Image ($IMAGE) detected. Bypassing foundation compile."
@@ -56,10 +96,10 @@ SPEC="$1"
 ROOT="$2"
 
 echo "==> [DISPATCH] Evaluating Target Spec: $SPEC"
-if [[ "$SPEC" == *"%%oneapi"* || "$SPEC" == *"%%intel"* ]]; then
+if [[ "$SPEC" == *"%oneapi"* || "$SPEC" == *"%intel"* ]]; then
     echo "==> [DISPATCH] Switching to Intel Track..."
     ./install_intel.sh "$SPEC" "$ROOT"
-elif [[ "$SPEC" == *"%%aocc"* ]]; then
+elif [[ "$SPEC" == *"%aocc"* ]]; then
     echo "==> [DISPATCH] Switching to AOCC Track..."
     ./install_aocc.sh "$SPEC" "$ROOT"
 else
@@ -98,6 +138,6 @@ for TARGET in "${TARGETS[@]}"; do
     fi
 done
 echo "==> [AUDIT] Audit Complete."
-' | apptainer exec --bind "$PWD":/build --bind /tmp:/tmp --home "$PWD" "$IMAGE" /bin/bash -s "$COMP_SPEC" "$INST_ROOT"
+' | apptainer exec --bind .:/build "$IMAGE" /bin/bash -s "$COMP_SPEC" "$INST_ROOT"
 
 log "Process Complete."

@@ -116,8 +116,9 @@ setup_spack_and_repos() {
     sed -i "s/depends_on(\"libtool/#depends_on(\"libtool/g" "${MIRROR_DIR}/packages/mpfr/package.py"
     sed -i "s/depends_on(\"texinfo/#depends_on(\"texinfo/g" "${MIRROR_DIR}/packages/mpfr/package.py"
 
-    spack repo add "$PWD" || true
-    spack repo add "${MIRROR_DIR}" || true
+    log "Registering Repositories..."
+    spack repo add --scope site "$PWD" || true
+    spack repo add --scope site "${MIRROR_DIR}" || true
     spack clean -m || true
 }
 
@@ -187,11 +188,11 @@ config = {
             "hdf5": {"require": ["target=${ARCH_VAL}", "${SHARED_VAL}"]},
             "zlib": {"require": ["target=${ARCH_VAL}", "${SHARED_VAL}"]},
             "zlib-ng": {"require": ["target=${ARCH_VAL}", "${SHARED_VAL}"]},
-            "gmp": {"require": ["target=${ARCH_VAL}", "${LIBS_VAL}"]},
-            "mpfr": {"require": ["target=${ARCH_VAL}", "${LIBS_VAL}"]},
-            "mpc": {"require": ["target=${ARCH_VAL}", "${LIBS_VAL}"]},
-            "zstd": {"require": ["target=${ARCH_VAL}", "${LIBS_VAL}"]},
-            "libiconv": {"require": ["target=${ARCH_VAL}", "${LIBS_VAL}"]}
+            "gmp": {"require": ["target=${ARCH_VAL}"]},
+            "mpfr": {"require": ["target=${ARCH_VAL}"]},
+            "mpc": {"require": ["target=${ARCH_VAL}"]},
+            "zstd": {"require": ["target=${ARCH_VAL}"]},
+            "libiconv": {"require": ["target=${ARCH_VAL}"]}
         }
     }
 }
@@ -209,7 +210,8 @@ bootstrap_gcc_base() {
     spack external find gmake tar xz bzip2 perl diffutils
     
     log "Bootstrapping GCC 14 using system toolchain: %gcc@${SYSTEM_VER_FULL}..."
-    spack install -j ${BUILD_JOBS} "gcc@14.3.0+piclibs %gcc@${SYSTEM_VER_FULL}" target=${SPACK_TARGET} < /dev/null
+    # Relax target for bootstrap phase to avoid microarch conflicts
+    spack install -j ${BUILD_JOBS} "gcc@14.3.0+piclibs %gcc@${SYSTEM_VER_FULL}" < /dev/null
     
     SPACK_GCC_PATH=$(spack find --format "{prefix}" gcc@14 | head -n 1)
     GCC_VER=$(spack find --format "{version}" gcc@14.3.0 | head -n 1)
