@@ -7,15 +7,22 @@ class Ioapi(MakefilePackage):
     homepage = "https://www.cmascenter.org/ioapi/"
     git = "https://github.com/cjcoats/ioapi-3.2"
     version("3.2", branch="master")
+    variant("shared", default=True, description="Build shared libraries")
+    variant("mpi", default=False, description="Enable MPI support")
 
     depends_on("c", type="build")
     depends_on("cxx", type="build")
     depends_on("fortran", type="build")
+    depends_on("gcc")
 
-    # Generic dependencies (use +shared and +fortran for toolchain consistency)
-    depends_on("hdf5+shared~mpi+cxx+fortran+hl")
-    depends_on("netcdf-c~mpi+shared~dap")
-    depends_on("netcdf-fortran+shared")
+    # Generic dependencies (follow global variants for toolchain consistency)
+    depends_on("hdf5~shared+cxx+fortran+hl")
+    depends_on("hdf5+mpi", when="+mpi")
+    depends_on("netcdf-c~shared~dap")
+    depends_on("netcdf-c+mpi", when="+mpi")
+    depends_on("netcdf-fortran")
+    depends_on("netcdf-fortran+mpi", when="+mpi")
+    depends_on("mpi", when="+mpi")
     depends_on("sed", type="build")
     depends_on("gmake", type="build")
     depends_on("zlib")
@@ -66,11 +73,26 @@ class Ioapi(MakefilePackage):
         makeinc.filter(r'^CXX\s*=.*', f'CXX = {spack_cxx}{env_flags}')
         makeinc.filter(r'^FC\s*=.*',  f'FC  = {spack_fc}{env_flags}')
 
-        if 'oneapi' in spec.compiler.name.lower() or 'intel' in spec.compiler.name.lower():
-            # Resolve multiple definition errors for iargc/getarg with Intel ifx
-            # Prepend the flag to avoid breaking line-continuation backslashes at the end of lines
-            filter_file(r'^COPTFLAGS\s*=\s*', 'COPTFLAGS = -Wl,-allow-multiple-definition ', makeinc_path)
-            filter_file(r'^FOPTFLAGS\s*=\s*', 'FOPTFLAGS = -Wl,-allow-multiple-definition ', makeinc_path)
+        # Surgically append the linker fix ONLY for static builds to resolve symbol overlaps
+        if "~shared" in self.spec:
+            comp = self.spec.compiler.name.lower()
+            ld_flag = "-Wl,-allow-multiple-definition" if 'oneapi' in comp or 'intel' in comp else "-Wl,--allow-multiple-definition"
+            
+            # Add static runtime flags too for total portability
+            gcc = self.spec['gcc']
+            gcc_lib64 = os.path.join(gcc.prefix, "lib64")
+            gcc_internal = os.path.join(gcc.prefix, "lib", "gcc", "x86_64-pc-linux-gnu", str(gcc.version))
+            gcc_L = f"-L{gcc_lib64} -L{gcc_internal} -B{gcc_internal}"
+
+            if 'oneapi' in comp or 'intel' in comp:
+                static_runtime = f"{gcc_L} -static-intel"
+            elif 'aocc' in comp:
+                static_runtime = f"{gcc_L} -static-flang-libs -static-openmp"
+            else:
+                static_runtime = "-static-libgcc -static-libgfortran"
+                
+            # Add -ldl for HDF5 transitive dependencies in static mode
+            makeinc.filter(r'^(OMPLIBS\s*=.*)', r'\1 ' + ld_flag + " -ldl " + static_runtime)
 
         # The native Makeinclude.Linux2_x86_64aoccflang has GCCOBJ with distro-specific
         # GCC CRT paths. These are already handled by AOCC's linker, so we remove the

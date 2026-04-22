@@ -13,11 +13,14 @@ class Smoke(MakefilePackage):
     version("5.2.1", preferred=False,
             url="https://github.com/CEMPD/SMOKE/archive/refs/tags/SMOKEv521_Sep2025.tar.gz",
             sha256="195aff8e25970ad1cbb051b32cc063bdf5639791e6da31538d2076408ff719df")
+    variant("shared", default=True, description="Build shared libraries")
 
     depends_on("c", type="build")
     depends_on("fortran", type="build")
+    depends_on("gcc")
 
-    depends_on("ioapi@3.2")
+    depends_on("ioapi +shared", when="+shared")
+    depends_on("ioapi ~shared", when="~shared")
     depends_on("zlib")
     depends_on("netcdf-c")
     depends_on("netcdf-fortran")
@@ -50,6 +53,31 @@ class Smoke(MakefilePackage):
         else:
             ioapi_bin = 'Linux2_x86_64'
 
+        # Determine compiler-specific OpenMP and Linker flags
+        if 'oneapi' in name or 'intel' in name:
+            omp_flag = "-qopenmp"
+            ld_flag  = "-Wl,-allow-multiple-definition"
+        else:
+            omp_flag = "-fopenmp"
+            ld_flag  = "-Wl,--allow-multiple-definition"
+
+        # Force static linker flags if requested
+        if "~shared" in spec:
+            gcc = spec['gcc']
+            gcc_lib64 = os.path.join(gcc.prefix, "lib64")
+            gcc_internal = os.path.join(gcc.prefix, "lib", "gcc", "x86_64-pc-linux-gnu", str(gcc.version))
+            gcc_L = f"-L{gcc_lib64} -L{gcc_internal} -B{gcc_internal}"
+
+            if 'oneapi' in name or 'intel' in name:
+                static_runtime = f"{gcc_L} -static-intel"
+            elif 'aocc' in name:
+                static_runtime = f"{gcc_L} -static-flang-libs -static-openmp"
+            else:
+                static_runtime = "-static-libgcc -static-libgfortran"
+            linker_flags = f"{omp_flag} {ld_flag} {static_runtime}"
+        else:
+            linker_flags = omp_flag
+
         makeinclude = f"""
 BASEDIR = {self.stage.source_path}/src
 INCDIR  = $(BASEDIR)/inc
@@ -65,12 +93,12 @@ CC  = {spack_cc}
 
 IFLAGS = -I$(IOINC) -I$(INCDIR) -I$(OBJDIR) -I{ioapi}/lib -I{ioapi}/{ioapi_bin} -I{netcdff}/include
 EFLAG = {eflag}
-FFLAGS = $(IFLAGS) $(EFLAG) -O3 -fopenmp
-LDFLAGS = $(IFLAGS) -fopenmp
+FFLAGS = $(IFLAGS) $(EFLAG) -O3 {omp_flag}
+LDFLAGS = $(IFLAGS) {linker_flags}
 ARFLAGS = rv
 
 SMKLIB = -L$(OBJDIR) -lsmoke
-IOLIB = -L$(IOBASE)/lib -lioapi -L{netcdff}/lib -lnetcdff -L{netcdfc}/lib -lnetcdf -L{hdf5}/lib -lhdf5_hl -lhdf5 -L{zlib}/lib -lz
+IOLIB = -L$(IOBASE)/lib -lioapi -L{netcdff}/lib -lnetcdff -L{netcdfc}/lib -lnetcdf -L{hdf5}/lib -lhdf5_hl -lhdf5 -L{zlib}/lib -lz -ldl
 
 LIBS = -L$(OBJDIR) -lfileset -lsmoke -lemmod -lfileset -lsmoke $(IOLIB) 
 VPATH = $(OBJDIR)
