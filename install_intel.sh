@@ -74,10 +74,31 @@ setup_spack_and_repos() {
     rm -f "$SPACK_ROOT/etc/spack/"{config,packages,compilers,repos}.yaml
     rm -rf "$SPACK_ROOT/etc/spack/"{site,linux}
 
-    spack repo add "${PACKAGES_ROOT}/repos/spack_repo/builtin" || true
-    spack repo add "$PWD" || true
+    spack repo add --scope site "${PACKAGES_ROOT}/repos/spack_repo/builtin" || true
+    spack repo add --scope site "$PWD" || true
     spack mirror list | grep -v "==>" | awk "{print \$1}" | xargs -I {} spack mirror remove {} || true
     spack clean -m || true
+
+    log "Enforcing strict static toolchain invariants globally..."
+    local LIBS_VAL="libs=static"
+    [[ "${BUILD_STATIC:-1}" == "0" ]] && LIBS_VAL="libs=shared,static"
+    
+    mkdir -p "$SPACK_ROOT/etc/spack"
+    cat <<EOF > "$SPACK_ROOT/etc/spack/packages.yaml"
+packages:
+  all:
+    require: ["target=${SPACK_TARGET:-x86_64}"]
+  gmp:
+    require: ["${LIBS_VAL}"]
+  mpfr:
+    require: ["${LIBS_VAL}"]
+  mpc:
+    require: ["${LIBS_VAL}"]
+  zstd:
+    require: ["${LIBS_VAL}"]
+  libiconv:
+    require: ["${LIBS_VAL}"]
+EOF
 }
 
 apply_intel_patches() {
@@ -278,8 +299,10 @@ fi
 source "$SPACK_ROOT/share/spack/setup-env.sh"
 spack env activate -d "${ENV_DIR}"
 
-log "Purging hybrid foundation to ensure strictly static toolchain..."
-spack uninstall -a -y --force gmp mpfr mpc zstd libiconv || true
+if [ "${BUILD_STATIC:-1}" == "1" ]; then
+    log "Purging hybrid foundation to ensure strictly static toolchain..."
+    spack uninstall -a -y --force gmp mpfr mpc zstd libiconv >/dev/null 2>&1 || true
+fi
 
 log "Resolving Intel oneAPI Track versions..."
 INTEL_REQ_VER=$(echo "$COMPILER_SPEC" | sed -n 's/.*%[a-z0-9\-]*@\([^ ]*\).*/\1/p')

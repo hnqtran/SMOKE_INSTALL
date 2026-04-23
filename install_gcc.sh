@@ -32,13 +32,8 @@ else
 fi
 [[ "$MY_INSTALL_ROOT" != /* ]] && MY_INSTALL_ROOT="$PWD/$MY_INSTALL_ROOT"
 
-if [ -d "/opt/smoke_foundation/spack" ]; then
-    SPACK_ROOT="/opt/smoke_foundation/spack"
-    PACKAGES_ROOT="/opt/smoke_foundation/spack-packages"
-else
-    SPACK_ROOT="$PWD/spack"
-    PACKAGES_ROOT="${PWD}/spack-packages"
-fi
+SPACK_ROOT="$MY_INSTALL_ROOT/spack"
+PACKAGES_ROOT="$MY_INSTALL_ROOT/spack-packages"
 BUILD_STATIC="${BUILD_STATIC:-0}"
 SPACK_VERSION="${SPACK_VERSION:-develop}"
 SPACK_TARGET="${SPACK_TARGET:-x86_64}"
@@ -57,7 +52,7 @@ get_safe_build_jobs() {
 }
 
 setup_spack_and_repos() {
-    if [ ! -d "spack" ]; then
+    if [ ! -d "$SPACK_ROOT" ]; then
         log "Dynamically identifying latest stable Spack release..."
         # Querying tags, filtering for stable releases (avoiding pre/alpha/beta), and grabbing the highest
         LATEST_STABLE=$(git ls-remote --tags https://github.com/spack/spack.git | \
@@ -66,7 +61,7 @@ setup_spack_and_repos() {
                         sort -V | tail -n 1)
         
         log "Found Latest Stable: ${LATEST_STABLE}. Hydrating foundation..."
-        git clone -b "${LATEST_STABLE}" --depth 1 https://github.com/spack/spack.git
+        git clone -b "${LATEST_STABLE}" --depth 1 https://github.com/spack/spack.git "$SPACK_ROOT"
         export SPACK_VERSION="${LATEST_STABLE}"
     fi
     if [[ ! -d "$PACKAGES_ROOT" ]]; then
@@ -81,15 +76,15 @@ setup_spack_and_repos() {
     mkdir -p "$SPACK_ROOT/etc/spack"
     rm -f "$SPACK_ROOT/etc/spack/"{config,packages,compilers,repos}.yaml
     rm -rf "$SPACK_ROOT/etc/spack/"{site,linux}
-    rm -rf "${PWD}/envs"
-    rm -rf "${PWD}/.spack" || true
+    rm -rf "${MY_INSTALL_ROOT}/envs"
+    rm -rf "${MY_INSTALL_ROOT}/.spack" || true
 
     MIRROR_DIR="${PWD}/spack_mirror"
     log "Creating Safe Mirror to isolate incompatible submodule recipes..."
     rm -rf "${MIRROR_DIR}" && mkdir -p "${MIRROR_DIR}/packages"
     printf "repo:\n  namespace: builtin_mirror\n" > "${MIRROR_DIR}/repo.yaml"
     # Link ONLY infra what we need from the submodule
-    WANTED_PKGS=("zlib" "zlib_ng" "libiconv" "gmp" "mpfr" "mpc" "zstd" "gmake" "cmake" "binutils" "pkgconf" "diffutils" "perl" "m4")
+    WANTED_PKGS=("zlib" "zlib_ng" "libiconv" "gmp" "mpfr" "mpc" "zstd" "gmake" "cmake" "binutils" "pkgconf" "diffutils" "perl" "m4" "gnuconfig")
     log "Hydrating Minimalist Mirror: ${WANTED_PKGS[*]}..."
     for pkg_name in "${WANTED_PKGS[@]}"; do
         pkg_src="${PACKAGES_ROOT}/repos/spack_repo/builtin/packages/${pkg_name}"
@@ -120,12 +115,33 @@ setup_spack_and_repos() {
     spack repo add --scope site "$PWD" || true
     spack repo add --scope site "${MIRROR_DIR}" || true
     spack clean -m || true
+
+    log "Enforcing strict static toolchain invariants globally..."
+    local LIBS_VAL="libs=static"
+    [[ "${BUILD_STATIC:-1}" == "0" ]] && LIBS_VAL="libs=shared,static"
+    
+    mkdir -p "$SPACK_ROOT/etc/spack"
+    cat <<EOF > "$SPACK_ROOT/etc/spack/packages.yaml"
+packages:
+  all:
+    require: ["target=${SPACK_TARGET:-x86_64}"]
+  gmp:
+    require: ["${LIBS_VAL}"]
+  mpfr:
+    require: ["${LIBS_VAL}"]
+  mpc:
+    require: ["${LIBS_VAL}"]
+  zstd:
+    require: ["${LIBS_VAL}"]
+  libiconv:
+    require: ["${LIBS_VAL}"]
+EOF
 }
 
 write_env_yaml() {
     local BOOTSTRAP_MODE="${1:-0}"
     local ARCH_VAL="${SPACK_TARGET:-x86_64}"
-    local ENV_DIR="${PWD}/envs/${ENV_NAME:-default}"
+    local ENV_DIR="${MY_INSTALL_ROOT}/envs/${ENV_NAME:-default}"
     local SHARED_VAL="~shared"
     local LIBS_VAL="libs=static"
     [[ "${BUILD_STATIC:-1}" == "0" ]] && { SHARED_VAL="+shared"; LIBS_VAL="libs=shared,static"; }
@@ -169,8 +185,8 @@ config = {
         "view": True,
         "repos": ["${PWD}", "${MIRROR_DIR}"],
         "packages": {
-            "all": {"require": ["target=${ARCH_VAL}"]} if not ${BOOTSTRAP_MODE} else {},
-            "gcc": {"externals": [{"spec": "gcc@${SYSTEM_VER_FULL} languages=c,c++,fortran", "prefix": "/usr"}], "buildable": True if ${BOOTSTRAP_MODE} else False},
+            "all": {},
+
             "gmake": {"externals": [{"spec": "gmake@${GMAKE_VER}", "prefix": "${GMAKE_PREFIX}"}], "buildable": False},
             "diffutils": {"externals": [{"spec": "diffutils@${DIFF_VER}", "prefix": "${DIFF_PREFIX}"}], "buildable": False},
             "perl": {"externals": [{"spec": "perl@${PERL_VER}", "prefix": "${PERL_PREFIX}"}], "buildable": False},
@@ -188,11 +204,11 @@ config = {
             "hdf5": {"require": ["target=${ARCH_VAL}", "${SHARED_VAL}"]},
             "zlib": {"require": ["target=${ARCH_VAL}", "${SHARED_VAL}"]},
             "zlib-ng": {"require": ["target=${ARCH_VAL}", "${SHARED_VAL}"]},
-            "gmp": {"require": ["target=${ARCH_VAL}"]},
-            "mpfr": {"require": ["target=${ARCH_VAL}"]},
-            "mpc": {"require": ["target=${ARCH_VAL}"]},
-            "zstd": {"require": ["target=${ARCH_VAL}"]},
-            "libiconv": {"require": ["target=${ARCH_VAL}"]}
+            "gmp": {"require": ["target=${ARCH_VAL}", "${LIBS_VAL}"]},
+            "mpfr": {"require": ["target=${ARCH_VAL}", "${LIBS_VAL}"]},
+            "mpc": {"require": ["target=${ARCH_VAL}", "${LIBS_VAL}"]},
+            "zstd": {"require": ["target=${ARCH_VAL}", "${LIBS_VAL}"]},
+            "libiconv": {"require": ["target=${ARCH_VAL}", "${LIBS_VAL}"]}
         }
     }
 }
@@ -209,15 +225,16 @@ bootstrap_gcc_base() {
     spack compiler find
     spack external find gmake tar xz bzip2 perl diffutils
     
-    log "Bootstrapping GCC 14 using system toolchain: %gcc@${SYSTEM_VER_FULL}..."
+
+
     # Relax target for bootstrap phase to avoid microarch conflicts
-    spack install -j ${BUILD_JOBS} "gcc@14.3.0+piclibs %gcc@${SYSTEM_VER_FULL}" < /dev/null
+    spack install -j ${BUILD_JOBS} "gcc@14.3.0+piclibs target=x86_64" < /dev/null
     
     SPACK_GCC_PATH=$(spack find --format "{prefix}" gcc@14 | head -n 1)
     GCC_VER=$(spack find --format "{version}" gcc@14.3.0 | head -n 1)
     
     # Register production GCC
-    spack compiler find "${SPACK_GCC_PATH}"
+    spack compiler find --scope site "${SPACK_GCC_PATH}"
 }
 
 generate_final_config() {
@@ -254,8 +271,10 @@ fi
 source "$SPACK_ROOT/share/spack/setup-env.sh"
 spack env activate -d "${ENV_DIR}"
 
-log "Purging hybrid foundation to ensure strictly static toolchain..."
-spack uninstall -a -y --force gmp mpfr mpc zstd libiconv >/dev/null 2>&1 || true
+if [ "${BUILD_STATIC:-1}" == "1" ]; then
+    log "Purging hybrid foundation to ensure strictly static toolchain..."
+    spack uninstall -a -y --force gmp mpfr mpc zstd libiconv >/dev/null 2>&1 || true
+fi
 
 # Re-resolve paths if already installed
 GCC_VER=$(spack find --format "{version}" gcc@14 | head -n 1)

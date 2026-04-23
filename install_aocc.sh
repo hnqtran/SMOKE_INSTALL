@@ -116,9 +116,30 @@ setup_spack_and_repos() {
     sed -i "s/depends_on(\"libtool/#depends_on(\"libtool/g" "${MIRROR_DIR}/packages/mpfr/package.py"
     sed -i "s/depends_on(\"texinfo/#depends_on(\"texinfo/g" "${MIRROR_DIR}/packages/mpfr/package.py"
 
-    spack repo add "$PWD" || true
-    spack repo add "${MIRROR_DIR}" || true
+    spack repo add --scope site "$PWD" || true
+    spack repo add --scope site "${MIRROR_DIR}" || true
     spack clean -m || true
+
+    log "Enforcing strict static toolchain invariants globally..."
+    local LIBS_VAL="libs=static"
+    [[ "${BUILD_STATIC:-1}" == "0" ]] && LIBS_VAL="libs=shared,static"
+    
+    mkdir -p "$SPACK_ROOT/etc/spack"
+    cat <<EOF > "$SPACK_ROOT/etc/spack/packages.yaml"
+packages:
+  all:
+    require: ["target=${SPACK_TARGET:-x86_64}"]
+  gmp:
+    require: ["${LIBS_VAL}"]
+  mpfr:
+    require: ["${LIBS_VAL}"]
+  mpc:
+    require: ["${LIBS_VAL}"]
+  zstd:
+    require: ["${LIBS_VAL}"]
+  libiconv:
+    require: ["${LIBS_VAL}"]
+EOF
 }
 
 write_env_yaml() {
@@ -224,7 +245,7 @@ generate_final_config() {
     AOCC_PATH=$(echo $AOCC_INFO | awk '{print $1}')
     
     # Discovery will pick up the one we just built
-    spack compiler find "${AOCC_PATH}"
+    spack compiler find --scope site "${AOCC_PATH}"
     
     # We still need write_env_yaml to set the package requirements
     write_env_yaml
@@ -256,8 +277,10 @@ fi
 source "$SPACK_ROOT/share/spack/setup-env.sh"
 spack env activate -d "${ENV_DIR}"
 
-log "Purging hybrid foundation to ensure strictly static toolchain..."
-spack uninstall -a -y --force gmp mpfr mpc zstd libiconv >/dev/null 2>&1 || true
+if [ "${BUILD_STATIC:-1}" == "1" ]; then
+    log "Purging hybrid foundation to ensure strictly static toolchain..."
+    spack uninstall -a -y --force gmp mpfr mpc zstd libiconv >/dev/null 2>&1 || true
+fi
 
 log "Hydrating AOCC track..."
 spack install --add -j ${BUILD_JOBS} aocc+license-agreed %gcc@${GCC_VER} < /dev/null

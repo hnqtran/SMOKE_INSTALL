@@ -38,25 +38,17 @@ if [ ! -f "$IMAGE" ]; then
         log "Step 1: Hydrating foundation toolchain into external root ($CACHE_DIR)..."
         mkdir -p "$CACHE_DIR"
         
+        # Ensure base image is cached locally to prevent NFS locking errors during extraction
+        if [ ! -f "rocky8_base.sif" ]; then
+            log "Pulling base OS image locally (rocky8_base.sif)..."
+            apptainer pull rocky8_base.sif docker://spack/${OS_VERSION}
+        fi
+
         # We use apptainer exec (without --writable) to bypass cluster mount restrictions.
-        # This compiles the toolchain inside Rocky 8 but stores the result on the RHEL 9 host.
-        apptainer exec --bind .:/build --bind "$CACHE_DIR:/opt/smoke_foundation" docker://spack/${OS_VERSION} /bin/bash -c "
-            set -e
-            export LC_ALL=C
-            export PATH=/usr/bin:/usr/local/bin:\$PATH
-            cd /build
-            
-            echo '==> [CONTAINER] Initiating GCC Foundation Cache...'
-            cp install_gcc.sh /tmp/install_gcc_foundation.sh
-            sed -i '/# Re-resolve paths if already installed/,\$d' /tmp/install_gcc_foundation.sh
-            
-            /tmp/install_gcc_foundation.sh \"\" \"/opt/smoke_foundation\"
-            
-            echo '==> [CONTAINER] Caching Heavy Build Tools...'
-            # Ensure the newly built Spack is in PATH
-            export PATH=\"/opt/smoke_foundation/spack/bin:\$PATH\"
-            spack install cmake autoconf automake m4 pkgconf %gcc@14 target=${SPACK_TARGET:-x86_64}
-        "
+        # This compiles the toolchain inside Rocky 8 but stores the result on the host.
+        # Logic is externalized to container_payload.sh to prevent escaping corruption.
+        chmod +x container_payload.sh
+        apptainer exec --bind .:/build --bind "$CACHE_DIR:/opt/smoke_foundation" rocky8_base.sif bash /build/container_payload.sh
     else
         log "Step 1 (Skipped): Existing foundation cache detected."
     fi
