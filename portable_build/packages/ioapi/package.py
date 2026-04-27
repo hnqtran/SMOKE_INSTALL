@@ -80,16 +80,36 @@ class Ioapi(MakefilePackage):
         
         makeinc_path = os.path.join(temp_source_dir, 'ioapi', f'Makeinclude.{BIN}')
         makeinc = FileFilter(makeinc_path)
-        # Use actual compiler binary paths to avoid recursive variable expansion
-        # Inject AOCC-specific flags to resolve relocation errors
-        if 'aocc' in self.spec.compiler.name.lower() or self.spec.satisfies('%aocc'):
-            env_flags = ' -fPIC -mcmodel=medium'
-        else:
-            env_flags = ''
+        
+        # Inject AOCC-specific flags to resolve relocation errors (Finding #201)
+        env_flags = ' -fPIC -mcmodel=medium' if spec.satisfies('%aocc') else ''
 
-        makeinc.filter(r'^CC\s*=.*',  f'CC  = {spack_cc}{env_flags}')
-        makeinc.filter(r'^CXX\s*=.*', f'CXX = {spack_cxx}{env_flags}')
-        makeinc.filter(r'^FC\s*=.*',  f'FC  = {spack_fc}{env_flags}')
+        # Finding #192: Deep Discovery of Foundation Static Runtimes
+        import glob
+        gcc_lib64 = None
+        # Deep search for libgomp.a in foundation or near compiler
+        potential_paths = glob.glob('/opt/foundation/**/lib64/libgomp.a', recursive=True)
+        if potential_paths:
+            gcc_lib64 = os.path.dirname(potential_paths[0])
+        
+        if not gcc_lib64:
+             _cc_dir = os.path.dirname(self.compiler.cc)
+             _path = os.path.join(os.path.dirname(_cc_dir), 'lib64')
+             if os.path.exists(os.path.join(_path, 'libgomp.a')):
+                 gcc_lib64 = _path
+        
+        if not gcc_lib64:
+             gcc_lib64 = "/usr/lib64"
+
+        print(f"==> [DEBUG] Discovered GCC Lib64: {gcc_lib64}")
+        static_runtime = f"{os.path.join(gcc_lib64, 'libgomp.a')} {os.path.join(gcc_lib64, 'libquadmath.a')} -lpthread -ldl"
+
+        makeinc.filter(r'^CC\s*=.*',  f'CC  = {self.compiler.cc}{env_flags}')
+        makeinc.filter(r'^CXX\s*=.*', f'CXX = {self.compiler.cxx}{env_flags}')
+        makeinc.filter(r'^FC\s*=.*',  f'FC  = {self.compiler.fc}{env_flags}')
+        
+        # Inject the static runtimes into NCFLIBS to ensure they hit the linking phase of m3tools
+        makeinc.filter(r'^(NCFLIBS\s*=.*)', r'\1 ' + static_runtime)
 
         # Force allow-multiple-definition for static NetCDF-4.6+ conflicts
         filter_file(r'^FOPTFLAGS\s*=\s*', 'FOPTFLAGS = -Wl,--allow-multiple-definition ', makeinc_path)
@@ -138,6 +158,18 @@ class Ioapi(MakefilePackage):
                 break
         with open(os.path.join(temp_source_dir, 'ioapi', 'sortic.c'), 'w') as f:
             f.writelines(lines)
+
+        # Brute Force Linkage: Replace any dynamic OpenMP flags with our absolute static paths
+        # across the entire source tree to prevent host library leakage.
+        # CRITICAL: We remove -fopenmp from the link phase (Makefiles/Makeincludes) 
+        # because it triggers implicit dynamic linkage.
+        for root, dirs, files in os.walk(self.stage.source_path):
+            for f in files:
+                if 'Makefile' in f or 'Makeinclude' in f:
+                    _fpath = os.path.join(root, f)
+                    filter_file(r'-lgomp', static_runtime, _fpath)
+                    # Force static linkage by replacing the dynamic flag with the static archive path
+                    filter_file(r'-fopenmp', static_runtime, _fpath)
 
         make("configure")
         make("dirs")

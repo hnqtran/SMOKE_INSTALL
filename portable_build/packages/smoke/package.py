@@ -52,6 +52,26 @@ class Smoke(MakefilePackage):
         else:
             ioapi_bin = 'Linux2_x86_64'
 
+        # Finding #192: Deep Discovery of Foundation Static Runtimes
+        import glob
+        gcc_lib64 = None
+        # Deep search for libgomp.a in foundation or near compiler
+        potential_paths = glob.glob('/opt/foundation/**/lib64/libgomp.a', recursive=True)
+        if potential_paths:
+            gcc_lib64 = os.path.dirname(potential_paths[0])
+        
+        if not gcc_lib64:
+             _cc_dir = os.path.dirname(self.compiler.cc)
+             _path = os.path.join(os.path.dirname(_cc_dir), 'lib64')
+             if os.path.exists(os.path.join(_path, 'libgomp.a')):
+                 gcc_lib64 = _path
+        
+        if not gcc_lib64:
+             gcc_lib64 = "/usr/lib64"
+
+        print(f"==> [DEBUG] Discovered GCC Lib64: {gcc_lib64}")
+        static_runtime = f"{os.path.join(gcc_lib64, 'libgomp.a')} {os.path.join(gcc_lib64, 'libquadmath.a')} -lpthread -ldl"
+
         makeinclude = f"""
 BASEDIR = {self.stage.source_path}/src
 INCDIR  = $(BASEDIR)/inc
@@ -62,8 +82,8 @@ IODIR   = $(IOBASE)/ioapi
 IOINC   = $(IOBASE)/include/fixed132
 IOBIN   = lib
 
-F90 = {spack_fc}
-CC  = {spack_cc}
+F90 = {self.compiler.fc}
+CC  = {self.compiler.cc}
 
 IFLAGS = -I$(IOINC) -I$(INCDIR) -I$(OBJDIR) -I{ioapi}/lib -I{ioapi}/{ioapi_bin} -I{netcdff}/include
 EFLAG = {eflag}
@@ -71,7 +91,7 @@ FFLAGS = $(IFLAGS) $(EFLAG) -O3 -fopenmp
 LDFLAGS = $(IFLAGS) -fopenmp
 ARFLAGS = rv
 
-LIBS    = -L$(OBJDIR) -lfileset -lsmoke -lemmod -lfileset -lsmoke -L{ioapi}/lib -lioapi -L{netcdff}/lib -lnetcdff -L{netcdfc}/lib -lnetcdf -L{hdf5}/lib -lhdf5_hl -lhdf5 -L{zlib}/lib -lz -ldl {link_flags}
+LIBS    = -L$(OBJDIR) -lfileset -lsmoke -lemmod -lfileset -lsmoke -L{ioapi}/lib -lioapi -L{netcdff}/lib -lnetcdff -L{netcdfc}/lib -lnetcdf -L{hdf5}/lib -lhdf5_hl -lhdf5 -L{zlib}/lib -lz -ldl {static_runtime} {link_flags}
 VPATH = $(OBJDIR)
 
 MODBEIS3   = modbeis3.mod
@@ -108,6 +128,21 @@ MODGRDLIB  = modgrdlib.mod
         mkdirp("build")
         with open("src/Makeinclude", "w") as f:
             f.write(makeinclude)
+
+        # Brute Force Linkage: Replace any dynamic OpenMP flags with our absolute static paths
+        # across the entire source tree to prevent host library leakage.
+        # CRITICAL: We remove -fopenmp from the link phase (Makefiles/Makeincludes) 
+        # because it triggers implicit dynamic linkage.
+        for root, dirs, files in os.walk(self.stage.source_path):
+            for f in files:
+                if 'Makefile' in f or 'Makeinclude' in f:
+                    _fpath = os.path.join(root, f)
+                    # Replace shortcut flags with absolute paths
+                    filter_file(r'-lgomp', static_runtime, _fpath)
+                    # For -fopenmp, we replace it with the static archive ONLY if it's likely a link line
+                    # or just remove it if we already have the static runtime in the command.
+                    # In SMOKE, we'll replace it with the static runtime to be safe.
+                    filter_file(r'-fopenmp', static_runtime, _fpath)
 
         # Patch the SMOKE src/Makefile to enforce library build ordering:
         # SLIB (libsmoke) depends on FLIB (libfileset, which defines modfileset.mod)

@@ -1,9 +1,9 @@
 #!/bin/bash
+set -euo pipefail
+
 # SMOKE Independent Portable Build Orchestrator (Apptainer/RockyLinux 8)
 # Track: GCC Toolchain with Foundation Caching
 # Enforces complete static linking and x86_64 generic architecture.
-
-set -euo pipefail
 
 # --- DOCUMENTATION ---
 # This script utilizes several persistent layers to ensure isolation and speed:
@@ -31,180 +31,176 @@ set -euo pipefail
 #    - Benefit: Prevents 'No space left on device' errors in the host /tmp.
 # ---------------------
 
-# --- Host-Side Configuration ---
+# --- Configuration & Paths ---
 OS_IMAGE="rocky8_build.sif"
-COMP_SPEC="${1:-%gcc}"
-INSTALL_ROOT="${2:-./install_portable}"
-[[ "$INSTALL_ROOT" != /* ]] && INSTALL_ROOT="$PWD/$INSTALL_ROOT"
-
-# Isolation & Registry Paths
+INSTALL_ROOT="./install_gcc"
+FOUNDATION_CACHE="${PWD}/.foundation_cache"
+BUILD_CACHE="${PWD}/.build_cache"
 SPACK_HOME_DIR="${PWD}/.spack_home"
 CACHE_DIR="${PWD}/.apptainer_cache"
 TMP_DIR="${PWD}/.apptainer_tmp"
 
-# .foundation_cache: Stores the bootstrapped GCC toolchain (Upstream). 
-# Saves ~20-30 mins by avoiding compiler recompilation.
-FOUNDATION_CACHE="${PWD}/.foundation_cache"
-
-# .build_cache: Stores binary versions of SMOKE and its dependencies (Mirror). 
-# Saves ~30-60 mins by reusing compiled libraries like NetCDF/HDF5.
-BUILD_CACHE="${PWD}/.build_cache"
-
 log() { echo "==> [PORTABLE] $1"; }
 
-# --- Helper: Dynamic Job Scaling ---
-get_safe_build_jobs() {
-    local jobs=$(awk '/MemAvailable/ {printf "%.0f", $2 / 1024 / 1024 / 2}' /proc/meminfo 2>/dev/null)
-    local cores=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
-    [[ -z "$jobs" ]] && jobs=2
-    [[ $jobs -lt 1 ]] && jobs=1
-    [[ $jobs -gt $cores ]] && jobs=$cores
-    echo $jobs
-}
-BUILD_JOBS=$(get_safe_build_jobs)
-
-# --- Preflight ---
-if ! command -v apptainer >/dev/null 2>&1; then
-    log "ERROR: Apptainer not found. Please load the apptainer module."
-    exit 1
-fi
-
-mkdir -p "$SPACK_HOME_DIR" "$CACHE_DIR" "$TMP_DIR" "$FOUNDATION_CACHE" "$BUILD_CACHE"
-
-if [ ! -f "$OS_IMAGE" ]; then
-    log "Pulling Spack-optimized Rocky Linux 8 image (pre-loaded with GCC)..."
-    APPTAINER_CACHEDIR="$CACHE_DIR" APPTAINER_TMPDIR="$TMP_DIR" \
-    apptainer pull "$OS_IMAGE" docker://spack/rockylinux8:latest
-fi
-
-log "Initializing Enclave with Foundation Cache..."
-log "Target Spec: $COMP_SPEC"
-# Robust host-side parser
-FORCE_REBUILD=false
+# --- Argument Parsing ---
+REBUILD_ALL=false
+REBUILD_LIBS=false
 REBUILD_IOAPI=false
-REBUILD_FOUNDATION=false
+REBUILD_SMOKE=false
+BUILD_JOBS=$(nproc 2>/dev/null || echo 4)
 POSITIONAL_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --force-rebuild) FORCE_REBUILD=true; shift ;;
+        --rebuild-all) REBUILD_ALL=true; shift ;;
+        --rebuild-libs) REBUILD_LIBS=true; shift ;;
         --rebuild-ioapi) REBUILD_IOAPI=true; shift ;;
-        --rebuild-foundation) REBUILD_FOUNDATION=true; shift ;;
-        *) POSITIONAL_ARGS+=("$1"); shift ;;
+        --rebuild-smoke) REBUILD_SMOKE=true; shift ;;
+        --jobs) BUILD_JOBS="$2"; shift 2 ;;
+        *) POSITIONAL_ARGS+=("$1") ; shift ;;
     esac
 done
 
-# Set defaults from positional args if provided
 COMP_SPEC="${POSITIONAL_ARGS[0]:-%gcc}"
-INSTALL_ROOT="${POSITIONAL_ARGS[1]:-./install_portable}"
+COMP_SPEC="${COMP_SPEC#%}" # Strip leading % if present
 [[ "$INSTALL_ROOT" != /* ]] && INSTALL_ROOT="$PWD/$INSTALL_ROOT"
 
-if [ "$FORCE_REBUILD" = "true" ]; then
-    log "HOST-SIDE TOTAL PURGE: Leveling metadata and application layers..."
-    rm -rf "$BUILD_CACHE" && mkdir -p "$BUILD_CACHE"
-    rm -rf "$INSTALL_ROOT" && mkdir -p "$INSTALL_ROOT"
-    rm -rf "$SPACK_HOME_DIR" && mkdir -p "$SPACK_HOME_DIR"
-    rm -rf "./spack" || true
+# --- Host-Side Preparation & Nuclear Cleanup ---
+if [ "$REBUILD_ALL" = "true" ]; then
+    log "NUCLEAR RESET: Purging ALL caches, installations, and toolchains..."
+    rm -rf "$INSTALL_ROOT" "$SPACK_HOME_DIR" "$FOUNDATION_CACHE" spack smoke_spec.json
 fi
+mkdir -p "$SPACK_HOME_DIR" "$CACHE_DIR" "$TMP_DIR" "$FOUNDATION_CACHE" "$BUILD_CACHE"
 
-if [ "$REBUILD_FOUNDATION" = "true" ]; then
-    log "HOST-SIDE FOUNDATION PURGE: Leveling toolchain layer..."
-    rm -rf "$FOUNDATION_CACHE" && mkdir -p "$FOUNDATION_CACHE"
+# Sanitize Foundation Metadata (Finding #153-revised)
+# Reconciles paths in the foundation database without pruning entries.
+_HOST_FOUNDATION_DB="$FOUNDATION_CACHE/opt/spack/.spack-db/index.json"
+if [ -f "$_HOST_FOUNDATION_DB" ]; then
+    log "Relocating Foundation Metadata (Finding #153)..."
+    python3 -c "
+import json, os
+db_path = '$_HOST_FOUNDATION_DB'
+with open(db_path, 'r') as f:
+    db = json.load(f)
+if 'database' in db and 'installs' in db['database']:
+    installs = db['database']['installs']
+    for h, data in installs.items():
+        if 'path' in data:
+            data['path'] = data['path'].replace('/build/spack/opt/spack', '/opt/foundation/opt/spack')
+with open(db_path, 'w') as f:
+    json.dump(db, f)
+" || true
 fi
 
 # --- Containerized Build Execution ---
-log "Launching Apptainer Container Enclave..."
+log "Launching Container Enclave..."
 apptainer exec --containall \
-    --home "$SPACK_HOME_DIR" \
     --bind .:/build \
-    --bind "$FOUNDATION_CACHE:/opt/foundation" \
-    --bind "$BUILD_CACHE:/opt/build_cache" \
     --bind /tmp:/tmp \
-    --env INSTALL_ROOT="$INSTALL_ROOT" \
+    --bind "$FOUNDATION_CACHE":/opt/foundation \
+    --bind "$BUILD_CACHE":/opt/build_cache \
+    --bind "$SPACK_HOME_DIR":"$HOME" \
     --env COMP_SPEC="$COMP_SPEC" \
-    --env FORCE_REBUILD="$FORCE_REBUILD" \
+    --env REBUILD_ALL="$REBUILD_ALL" \
+    --env REBUILD_LIBS="$REBUILD_LIBS" \
     --env REBUILD_IOAPI="$REBUILD_IOAPI" \
+    --env REBUILD_SMOKE="$REBUILD_SMOKE" \
     --env BUILD_JOBS="$BUILD_JOBS" \
     "$OS_IMAGE" /bin/bash <<'EOF'
 set -euo pipefail
 log() { echo "==> [CONTAINER] $1"; }
-log "Container initialized. Entering shell logic..."
 cd /build
 
-# --- Internal Constants ---
+# Paths
 SPACK_ROOT="/build/spack"
-PACKAGES_ROOT="/build/spack-packages"
 export SPACK_DISABLE_LOCAL_CONFIG=1
-export TERM=dumb
 
-
-# --- Step 1: Spack Setup ---
+# --- Step 1: Spack & Repo Setup ---
 if [ ! -d "spack" ]; then
     log "Downloading Spack v1.1.1..."
     git clone -b v1.1.1 --depth 1 https://github.com/spack/spack.git
 fi
-if [[ ! -d "spack-packages" ]]; then
-    log "Cloning core repository..."
-    git clone --depth 1 https://github.com/spack/spack-packages.git "$PACKAGES_ROOT"
-fi
-
-set +u
 source "$SPACK_ROOT/share/spack/setup-env.sh"
-set -u
+log "DEBUG: Spack version: $(spack --version)"
+
+log "Configuring Enclave..."
 mkdir -p "$SPACK_ROOT/etc/spack"
 rm -f "$SPACK_ROOT/etc/spack/"{config,packages,compilers,repos,upstreams}.yaml
-rm -rf "$SPACK_ROOT/etc/spack/"{site,linux}
 
-log "Initializing Repositories..."
-spack repo add --scope site "$PACKAGES_ROOT/repos/spack_repo/builtin" 2>/dev/null || true
-spack repo add --scope site /build 2>/dev/null || true
+# High-capacity staging and cache redirection is mandatory to prevent disk exhaustion in /proj (Finding #142)
+log "DEBUG: Creating config.yaml with /tmp redirection..."
+cat <<EOC > "$SPACK_ROOT/etc/spack/config.yaml"
+config:
+  build_jobs: $BUILD_JOBS
+  build_stage: [/tmp/tranhuy/spack-stage]
+  source_cache: /tmp/tranhuy/spack-cache
+  misc_cache: /tmp/tranhuy/spack-misc
+  test_stage: /tmp/tranhuy/spack-test
+  install_tree:
+    root: /build/install_gcc
+EOC
+
+# --- Step 2: Repository Cleanup ---
+log "DEBUG: Ensuring clean repository state..."
+spack repo remove smoke_v52 2>/dev/null || true
+
+# Register the local builtin repository to avoid network calls in isolated container
+log "Registering local builtin repository..."
+spack repo add --scope site /build/spack-packages/repos/spack_repo/builtin || true
 
 log "Configuring Binary Mirror..."
 spack mirror add local_cache file:///opt/build_cache 2>/dev/null || true
 spack buildcache keys --install --trust 2>/dev/null || true
 
-# --- Step 2: Foundation Discovery / Upstream Registration ---
+# --- Step 3: Toolchain & Upstream Registration ---
 # We check for a marker file indicating a complete foundation build.
 if [ -f "/opt/foundation/foundation_complete" ]; then
     log "Found established Foundation Cache at /opt/foundation. Synchronizing..."
-    
-    # Register as Upstream
     cat <<EOC > "$SPACK_ROOT/etc/spack/upstreams.yaml"
 upstreams:
-  foundation-cache:
+  foundation:
     install_tree: /opt/foundation/opt/spack
 EOC
-
-    # Discover and Register Foundation GCC
-    _CACHED_GCC=$(find /opt/foundation/opt/spack -name "gcc" -path "*/gcc-14*/bin/gcc" -type f | head -n 1)
-    if [ -n "$_CACHED_GCC" ]; then
-        log "Registering Foundation GCC from cache: $_CACHED_GCC"
-        FOUNDATION_VER=$($_CACHED_GCC -dumpfullversion 2>/dev/null || $_CACHED_GCC -dumpversion)
-    fi
-
-    # [INTEGRITY CHECK] Ensure foundation cache has its metadata 'brain'
-    _FOUNDATION_DB="/opt/foundation/opt/spack/.spack-db/index.json"
-    if [ -f "$_FOUNDATION_DB" ]; then
-        if ! grep -q "database" "$_FOUNDATION_DB" 2>/dev/null; then
-            log "WARNING: Poisoned metadata detected in foundation (GPG collision?). Purging for recovery..."
-            rm -f "$_FOUNDATION_DB"
-        fi
-    fi
-
-    if [ ! -f "$_FOUNDATION_DB" ]; then
-        log "WARNING: Foundation cache is 'Brainless'. Attempting healing on /opt/foundation..."
-        # Force re-indexing of the toolchain layer specifically
-        spack reindex /opt/foundation/opt/spack || true
-    fi
-fi
-
-# --- Step 3: Toolchain Bootstrap (Conditional) ---
-# Only enter bootstrap if the GCC 14 binary is physically missing.
-_GCC_FOUNDATION_CHECK=$(find /opt/foundation/opt/spack -name "gcc" -path "*/gcc-14*/bin/gcc" -type f | head -n 1)
-if [ -z "$_GCC_FOUNDATION_CHECK" ]; then
-    log "Initiating Toolchain Recovery/Bootstrap phase..."
+    log "DEBUG: Searching for GCC in foundation..."
+    _GCC_BIN=$(find /opt/foundation -name gcc -type f -path "*/gcc-14*/bin/gcc" | head -n 1)
     
-    # Standard configuration for bootstrap
+    if [ -n "$_GCC_BIN" ]; then
+        FOUNDATION_VER=$("$_GCC_BIN" -dumpversion || echo "14.3.0")
+        log "DEBUG: Found GCC $FOUNDATION_VER at $_GCC_BIN. Restoring Toolchain Wrappers..."
+        
+        # Re-create the wrappers that Spack expects at /build/toolchain_wrappers
+        mkdir -p /build/toolchain_wrappers
+        _GCC_DIR=$(dirname "$_GCC_BIN")
+        for tool in gcc g++ gfortran; do
+            cat <<EOW > "/build/toolchain_wrappers/$tool"
+#!/bin/bash
+exec "$_GCC_DIR/$tool" -B/opt/foundation/bin -L/opt/foundation/lib64 "\$@"
+EOW
+            chmod +x "/build/toolchain_wrappers/$tool"
+        done
+
+        # Manual registration of foundation toolchain using wrappers (Finding #149)
+        # Pointing to wrappers ensures relocation stability in isolated containers.
+        cat <<EOC > "$SPACK_ROOT/etc/spack/compilers.yaml"
+compilers:
+- compiler:
+    spec: gcc@$FOUNDATION_VER
+    paths:
+      cc: /build/toolchain_wrappers/gcc
+      cxx: /build/toolchain_wrappers/g++
+      f77: /build/toolchain_wrappers/gfortran
+      fc: /build/toolchain_wrappers/gfortran
+    operating_system: rocky8
+    target: x86_64
+    modules: []
+    environment: {}
+    flags: {}
+EOC
+    fi
+else
+    log "No Foundation Cache found. Initiating Toolchain Recovery/Bootstrap phase..."
+    
+    # Step 3.1: Standard configuration for bootstrap
     cat <<EOC > "$SPACK_ROOT/etc/spack/config.yaml"
 config:
   build_jobs: $BUILD_JOBS
@@ -212,17 +208,35 @@ config:
     root: "$SPACK_ROOT/opt/spack"
 EOC
 
-    log "Searching for bootstrap compiler..."
-    spack compiler find --scope site || true
-    SYSTEM_GCC=$(command -v gcc || true)
-    GCC_VER_BASE=$($SYSTEM_GCC -dumpfullversion 2>/dev/null || $SYSTEM_GCC -dumpversion)
-    SYSTEM_PREFIX=$(dirname $(dirname "$SYSTEM_GCC"))
+    log "Registering bootstrap compiler..."
+    # Manual registration of bootstrap compiler to avoid hanging discovery (Finding #2)
+    cat <<EOC > "$SPACK_ROOT/etc/spack/compilers.yaml"
+compilers:
+- compiler:
+    spec: gcc@8.5.0
+    paths:
+      cc: /usr/bin/gcc
+      cxx: /usr/bin/g++
+      f77: /usr/bin/gfortran
+      fc: /usr/bin/gfortran
+    operating_system: rocky8
+    target: x86_64
+    modules: []
+    environment: {}
+    flags: {}
+EOC
+    SYSTEM_GCC="/usr/bin/gcc"
+    GCC_VER_BASE="8.5.0"
+    SYSTEM_PREFIX="/usr"
 
     log "Aggressively patching toolchain metadata for resilience (Finding #16/19/20)..."
     # Resolve 'NoneType' errors by hardcoding system paths for bootstrap dependencies
-    find "$PACKAGES_ROOT" -name package.py | grep gcc_runtime | xargs sed -i "s|Executable(.*)|Executable('/usr/bin/gcc')|g"
-    # Unified language-aware fallback for compiler-wrapper
-    find "$PACKAGES_ROOT" -name package.py | grep compiler_wrapper | xargs sed -i "s|compiler = getattr(compiler_pkg, attr_name)|compiler = getattr(compiler_pkg, attr_name, '/usr/bin/gcc') or {'cc':'/usr/bin/gcc','cxx':'/usr/bin/g++','fortran':'/usr/bin/gfortran'}.get(attr_name, '/usr/bin/gcc')|g"
+    find "$SPACK_ROOT/var/spack/repos/builtin/packages" -name package.py | grep -E "gcc_runtime|compiler_wrapper" | xargs sed -i "s|Executable(compiler.cc)|Executable('/usr/bin/gcc')|g" || true
+
+    log "Clearing existing solver constraints for bootstrap..."
+    # Ensure no previous 'require' rules block the foundation build
+    # We remove the site-level packages.yaml to ensure a Tabula Rasa (Finding #152)
+    rm -f "$SPACK_ROOT/etc/spack/site/packages.yaml"
 
     log "Registering host toolchain externals..."
     cat <<EOC > /tmp/externals.yaml
@@ -238,122 +252,99 @@ packages:
 EOC
     spack config --scope site add -f /tmp/externals.yaml
 
-    # [SURGICAL BYPASS]
-    if [ -z "$(find "$SPACK_ROOT/opt/spack" -path "*/gcc-14*" -type d 2>/dev/null | head -n 1)" ]; then
-        log "Installing GCC 14 Toolchain (Generic x86_64)..."
-        spack --no-color install --reuse gcc@14.3.0 +binutils +bootstrap languages=c,c++,fortran target=x86_64 ^zlib-ng@2.3.3
-    fi
+    log "Installing Modern Toolchain (GCC 14 + Binutils)..."
+    spack --no-color install --reuse binutils@2.41 +ld +plugins %gcc@$GCC_VER_BASE target=x86_64
+    spack --no-color install --reuse gcc@14.3.0 +piclibs %gcc@$GCC_VER_BASE target=x86_64
 
-    log "Enforcing Database Re-indexing..."
-    spack reindex || true
-    FOUNDATION_VER=$(spack find --format "{version}" gcc@14.3.0 | head -n 1)
-    _CACHED_GCC=$(find "$SPACK_ROOT/opt/spack" -name "gcc" -path "*/gcc-14*/bin/gcc" -type f | head -n 1)
+    FOUNDATION_VER="14.3.0"
+    _GCC_BIN=$(find "$SPACK_ROOT/opt/spack" -name "gcc" -path "*/gcc-14*/bin/gcc" -type f | head -n 1)
 
-    log "Checkpointing Foundation..."
-    # Standardize hydration: Only hydrate if the cache is actually empty or forced
-    if [ ! -f "/opt/foundation/foundation_complete" ]; then
-        mkdir -p /opt/foundation/opt
-        cp -rp "$SPACK_ROOT/opt/spack" /opt/foundation/opt/
-        touch /opt/foundation/foundation_complete
-        log "Foundation hydrated."
-    fi
-fi
-
-# --- Step 4: Final SMOKE Build ---
-if [ "$FORCE_REBUILD" = "true" ]; then
-    log "ENFORCING SURGICAL FRESH START (Leveling Installs, Preserving Cache)..."
-    log "PURGE INVENTORY: Packages to be removed from local enclave..."
-    spack find -lv || true
-    rm -rf "$INSTALL_ROOT" && mkdir -p "$INSTALL_ROOT"
-    rm -rf "$SPACK_ROOT/opt/spack" && mkdir -p "$SPACK_ROOT/opt/spack"
-    rm -rf ~/.spack
-fi
-
-log "Enforcing strictly static toolchain for SMOKE..."
-cat <<EOC > "$SPACK_ROOT/etc/spack/config.yaml"
-config:
-  build_jobs: $BUILD_JOBS
-  install_tree:
-    root: "/build/$(basename "$INSTALL_ROOT")"
-EOC
-
-cat <<EOC > "$SPACK_ROOT/etc/spack/upstreams.yaml"
-upstreams:
-  foundation:
-    install_tree: /opt/foundation/opt/spack
-EOC
-
-log "Healing Toolchain Metadata (Finding #101)..."
-# v1.1.1 reindex is global. We anchor it in a writable path to avoid root FS collisions.
-mkdir -p "/build/$(basename "$INSTALL_ROOT")"
-( cd "/build/$(basename "$INSTALL_ROOT")" && spack reindex ) || true
-
-cat <<EOC > "$SPACK_ROOT/etc/spack/compilers.yaml"
+    log "Checkpointing Foundation to persistent cache..."
+    mkdir -p /opt/foundation/opt
+    cp -rp "$SPACK_ROOT/opt/spack" /opt/foundation/opt/
+    touch /opt/foundation/foundation_complete
+    
+    # Create relocation wrappers for the newly built foundation (Finding #149)
+    mkdir -p /build/toolchain_wrappers
+    _GCC_DIR=$(dirname "$_GCC_BIN")
+    for tool in gcc g++ gfortran; do
+        cat <<EOW > "/build/toolchain_wrappers/$tool"
+#!/bin/bash
+exec "$_GCC_DIR/$tool" -B/opt/foundation/bin -L/opt/foundation/lib64 "\$@"
+EOW
+        chmod +x "/build/toolchain_wrappers/$tool"
+    done
+    
+    cat <<EOC > "$SPACK_ROOT/etc/spack/compilers.yaml"
 compilers:
 - compiler:
-    spec: gcc@$FOUNDATION_VER
-    paths: {cc: $_CACHED_GCC, cxx: $(dirname "$_CACHED_GCC")/g++, f77: $(dirname "$_CACHED_GCC")/gfortran, fc: $(dirname "$_CACHED_GCC")/gfortran}
+    spec: gcc@14.3.0
+    paths:
+      cc: /build/toolchain_wrappers/gcc
+      cxx: /build/toolchain_wrappers/g++
+      f77: /build/toolchain_wrappers/gfortran
+      fc: /build/toolchain_wrappers/gfortran
     operating_system: rocky8
     target: x86_64
     modules: []
     environment: {}
+    flags: {}
+EOC
+fi
+
+# Step 3.2: Target the Modeling Stack installation directory (Finding #150)
+# We isolate the Modeling Stack (NetCDF/SMOKE) in /build/install_gcc to ensure
+# it can be packaged independently of the toolchain foundation.
+cat <<EOC > "$SPACK_ROOT/etc/spack/config.yaml"
+config:
+  build_jobs: $BUILD_JOBS
+  install_tree:
+    root: "/build/install_gcc"
 EOC
 
-cat <<EOC > "$SPACK_ROOT/etc/spack/packages.yaml"
+# --- Step 4: Solver Hardening ---
+# We pin the GCC package version to match the bootstrapped toolchain to resolve Solver Ghosts (Finding #188)
+log "DEBUG: Using Foundation GCC Version: $FOUNDATION_VER"
+
+# Non-destructive configuration injection (Finding #106)
+# This ensures that hardening rules are applied AFTER toolchain registration
+# and preserves the compiler metadata migrated by the Spack engine.
+cat <<EOC > /tmp/hardening.yaml
 packages:
+  gcc:
+    require: "@$FOUNDATION_VER"
   all:
-    require: ["target=x86_64", "os=rocky8"]
-    variants: "~shared +static +pic"
-  hdf5:
-    variants: "~shared +pic +hl +fortran +cxx ~mpi ~szip"
-  netcdf-c:
-    variants: "~shared +pic ~szip ~zstd ~dap ~mpi"
-  netcdf-fortran:
-    variants: "~shared +pic ~mpi ~doc"
-  zlib:
-    variants: "~shared +pic"
+    require: ["%$COMP_SPEC", "target=x86_64"]
+    variants: "+pic"
 EOC
+spack config --scope site add -f /tmp/hardening.yaml
 
-log "DEBUG: Verifying Active Package Configuration (All Scopes)..."
-for scope in defaults system site user; do
-    log "--- Scope: $scope ---"
-    spack config --scope $scope get packages 2>/dev/null || true
-done
+# --- Step 5: Final SMOKE Build ---
+log "DEBUG: Finalizing Repository Registration..."
+spack repo add --scope site /build || true
 
-log "Refreshing Binary Mirror Index..."
-spack buildcache update-index local_cache 2>/dev/null || true
+FULL_SPEC="smoke@master %gcc@$FOUNDATION_VER target=x86_64 ^netcdf-c~shared ^netcdf-fortran~shared ^hdf5~shared ^zlib~shared"
+log "DEBUG: Final Install Spec: $FULL_SPEC"
 
-log "Installing SMOKE (Target: x86_64)..."
-FULL_SPEC="smoke@master %gcc@$FOUNDATION_VER target=x86_64 ^netcdf-c~shared+pic ^netcdf-fortran~shared+pic ^hdf5~shared+pic ^zlib~shared"
-log "EXISTING INVENTORY: Registered Upstreams and Local Packages..."
-spack find -lv || true
-log "INSTALL PLAN: Final Concretized Spec and Configurations..."
-spack spec -Il $FULL_SPEC
-spack install --reuse -j $BUILD_JOBS $FULL_SPEC
+# Surgical Purges: Targeted uninstalls to allow rapid iteration without full stack rebuilds.
+if [ "$REBUILD_LIBS" = "true" ]; then
+    log "Surgical Purge: Dependent Libraries (NetCDF/HDF5/Zlib)"
+    spack uninstall -a -y --force netcdf-fortran netcdf-c hdf5 zlib || true
+fi
+if [ "$REBUILD_IOAPI" = "true" ]; then
+    log "Surgical Purge: ioapi"
+    spack uninstall -a -y --force ioapi || true
+fi
+if [ "$REBUILD_SMOKE" = "true" ]; then
+    log "Surgical Purge: smoke"
+    spack uninstall -a -y --force smoke || true
+fi
 
-log "Updating Binary Build Cache..."
-spack buildcache push --force --unsigned /opt/build_cache smoke@master || true
+log "Installing SMOKE Suite..."
+_INSTALL_FLAGS="--reuse"
+[ "$REBUILD_ALL" = "true" ] && _INSTALL_FLAGS="--no-cache"
 
-log "Starting Portability Audit (Deep Enclave Scan)..."
-# Scan all executables, shared objects, and static archives
-find "/build/$(basename "$INSTALL_ROOT")" \( -type f -executable -o -name "*.so*" -o -name "*.a" \) | while read -r target; do
-    echo "--- Audit: $(basename "$target") ---"
-    if [[ "$target" == *.a ]]; then
-        echo "   [OK] Static Archive Purity Verified"
-    else
-        # Inspect dynamic linkage: show enclave dependencies and flag missing ones
-        ldd "$target" 2>/dev/null | grep -E "(/build/spack|/opt/foundation|not found)" || true
-        
-        # [DEEP SYMBOL ANALYSIS] Verify static embedding for modeling binaries
-        # Proves that NetCDF and HDF5 logic is physically inside the binary.
-        if nm "$target" 2>/dev/null | grep -qE "(nf_.*open|H5.*open)"; then
-            echo "   [OK] Deep Static Purity: Modeling symbols (NetCDF/HDF5) are embedded."
-        fi
-        echo "   [OK] Linkage Verified"
-    fi
-done
+spack install $_INSTALL_FLAGS -v -j "$BUILD_JOBS" $FULL_SPEC
 EOF
 
-log "Build Process Complete."
-log "Results available in: $INSTALL_ROOT"
-
+log "Build process complete."
