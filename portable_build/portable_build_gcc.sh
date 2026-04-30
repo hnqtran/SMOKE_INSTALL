@@ -56,6 +56,8 @@ while [[ $# -gt 0 ]]; do
         --rebuild-libs) REBUILD_LIBS=true; shift ;;
         --rebuild-ioapi) REBUILD_IOAPI=true; shift ;;
         --rebuild-smoke) REBUILD_SMOKE=true; shift ;;
+        --add-version) NEW_VER="$2"; NEW_URL="$3"; shift 3 ;;
+        --smoke-version) REQ_VER="$2"; shift 2 ;;
         --jobs) BUILD_JOBS="$2"; shift 2 ;;
         *) POSITIONAL_ARGS+=("$1") ; shift ;;
     esac
@@ -64,6 +66,21 @@ done
 COMP_SPEC="${POSITIONAL_ARGS[0]:-%gcc}"
 COMP_SPEC="${COMP_SPEC#%}" # Strip leading % if present
 [[ "$INSTALL_ROOT" != /* ]] && INSTALL_ROOT="$PWD/$INSTALL_ROOT"
+
+# --- Dynamic Version Injection (Finding #155) ---
+SMOKE_VER_SPEC="@${REQ_VER:-master}"
+if [ -n "${NEW_VER:-}" ]; then
+    log "DYNAMIC VERSION: Injecting smoke@$NEW_VER from $NEW_URL"
+    NEW_SHA=$(curl -L "$NEW_URL" | sha256sum | awk '{print $1}')
+    if [ -n "$NEW_SHA" ]; then
+        grep -q "version(\"$NEW_VER\"" packages/smoke/package.py || \
+        sed -i "/version(\"master\"/a \    version(\"$NEW_VER\", url=\"$NEW_URL\", sha256=\"$NEW_SHA\")" packages/smoke/package.py
+        SMOKE_VER_SPEC="@$NEW_VER"
+    else
+        log "ERROR: Failed to calculate checksum for $NEW_URL"
+        exit 1
+    fi
+fi
 
 # --- Host-Side Preparation & Nuclear Cleanup ---
 if [ "$REBUILD_ALL" = "true" ]; then
@@ -323,7 +340,7 @@ spack config --scope site add -f /tmp/hardening.yaml
 log "DEBUG: Finalizing Repository Registration..."
 spack repo add --scope site /build || true
 
-FULL_SPEC="smoke@master %gcc@$FOUNDATION_VER target=x86_64 ^netcdf-c~shared ^netcdf-fortran~shared ^hdf5~shared ^zlib~shared"
+FULL_SPEC="smoke$SMOKE_VER_SPEC %gcc@$FOUNDATION_VER target=x86_64 ^netcdf-c~shared ^netcdf-fortran~shared ^hdf5~shared ^zlib~shared"
 log "DEBUG: Final Install Spec: $FULL_SPEC"
 
 # Surgical Purges: Targeted uninstalls to allow rapid iteration without full stack rebuilds.

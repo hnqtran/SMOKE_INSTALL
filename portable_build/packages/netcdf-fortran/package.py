@@ -30,7 +30,7 @@ class NetcdfFortran(AutotoolsPackage):
         spec = self.spec
         if name == "fflags":
             # Mandatory fix for modern GCC argument strictness
-            if spec.satisfies("%gcc@10:") or spec.satisfies("%aocc") or spec.satisfies("%oneapi"):
+            if spec.satisfies("%gcc@10:") or spec.satisfies("%aocc") or spec.satisfies("%intel-oneapi-compilers"):
                 flags.append("-fallow-argument-mismatch")
             if "+pic" in spec:
                 flags.append("-fPIC")

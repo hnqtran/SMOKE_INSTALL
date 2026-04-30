@@ -19,17 +19,16 @@ class Smoke(MakefilePackage):
 
     depends_on("ioapi@3.2")
     depends_on("zlib")
-    depends_on("netcdf-c")
-    depends_on("netcdf-fortran")
-    depends_on("hdf5")
-    depends_on("zlib-ng")
+    depends_on("netcdf-c+shared")
+    depends_on("netcdf-fortran+shared")
+    depends_on("hdf5+shared")
 
     def edit(self, spec, prefix):
         ioapi = spec['ioapi'].prefix
         netcdff = spec['netcdf-fortran'].prefix
         netcdfc = spec['netcdf-c'].prefix
         hdf5    = spec['hdf5'].prefix
-        zlib    = spec['zlib-ng'].prefix
+        zlib    = spec['zlib'].prefix
 
         # Determine SMOKE compiler flags based on its own compiler
         name = spec.compiler.name.lower()
