@@ -5,12 +5,13 @@
 set -euo pipefail
 
 # --- 1. Argument Parsing & Defaults ---
-MY_INSTALL_ROOT="${1:-$PWD/intel_latest}"
+MY_INSTALL_ROOT="${1:-$PWD/intel_compiler_set}"
 [[ "$MY_INSTALL_ROOT" != /* ]] && MY_INSTALL_ROOT="$PWD/$MY_INSTALL_ROOT"
 INTEL_REQ_VER="${2:-2025.3.2}"
 
-export SPACK_ROOT="$PWD/spack"
-PACKAGES_ROOT="${PWD}/spack-packages"
+PROJECT_ROOT="$PWD"
+export SPACK_ROOT="${PROJECT_ROOT}/spack"
+PACKAGES_ROOT="${PROJECT_ROOT}/spack-packages"
 
 # --- 2. Helper Functions ---
 log() { echo "==> $1"; }
@@ -28,8 +29,8 @@ get_safe_build_jobs() {
 
 setup_spack_and_repos() {
     if [ ! -d "spack" ]; then
-        log "Downloading Spack v1.1.1..."
-        git clone -b v1.1.1 --depth 1 https://github.com/spack/spack.git
+        log "Downloading Spack (latest release)..."
+        git clone -b releases/latest --depth 1 https://github.com/spack/spack.git
     fi
     if [[ ! -d "$PACKAGES_ROOT" ]]; then
         log "Cloning core repository..."
@@ -38,6 +39,9 @@ setup_spack_and_repos() {
     
     source "$SPACK_ROOT/share/spack/setup-env.sh"
     export SPACK_DISABLE_LOCAL_CONFIG=1
+    export SPACK_USER_CACHE_PATH="${PROJECT_ROOT}/.spack_cache_intel"
+    export SPACK_USER_CONFIG_PATH="${PROJECT_ROOT}/.spack_config_intel"
+    mkdir -p "${SPACK_USER_CACHE_PATH}" "${SPACK_USER_CONFIG_PATH}"
 
     log "Wiping site and local configurations..."
     mkdir -p "$SPACK_ROOT/etc/spack"
@@ -45,27 +49,28 @@ setup_spack_and_repos() {
     rm -rf "$SPACK_ROOT/etc/spack/"{site,linux}
     log "Debug: Site configuration wiped."
 
-    spack repo add --scope site "${PACKAGES_ROOT}/repos/spack_repo/builtin" || true
-    spack repo add --scope site "$PWD" || true
+    spack -C "${SPACK_USER_CONFIG_PATH}" repo add --scope site "${PACKAGES_ROOT}/repos/spack_repo/builtin" || true
+    spack -C "${SPACK_USER_CONFIG_PATH}" repo add --scope site "$PWD" || true
 
     log "Sanitizing mirror configuration..."
-    for m in $(spack mirror list | grep -v "==>" | awk "{print \$1}"); do
-        spack mirror remove "$m" || true
+    for m in $(spack -C "${SPACK_USER_CONFIG_PATH}" mirror list | grep -v "==>" | awk "{print \$1}"); do
+        spack -C "${SPACK_USER_CONFIG_PATH}" mirror remove "$m" || true
     done
-    spack clean -m || true
+    spack -C "${SPACK_USER_CONFIG_PATH}" clean -m || true
     log "Debug: Repositories and mirrors sanitized."
 }
 
 init_spack_config() {
     log "Configuring foundation install path..."
-    mkdir -p "$SPACK_ROOT/etc/spack"
-    log "Debug: Generating config.yaml at $SPACK_ROOT/etc/spack/config.yaml..."
-    cat <<EOF > "$SPACK_ROOT/etc/spack/config.yaml"
+    log "Debug: Generating config.yaml at ${SPACK_USER_CONFIG_PATH}/config.yaml..."
+    cat <<EOF > "${SPACK_USER_CONFIG_PATH}/config.yaml"
 config:
   install_tree:
     root: "$MY_INSTALL_ROOT"
     projections:
       all: "{name}-{version}-{compiler.name}-{hash:7}"
+  build_stage:
+    - "$PROJECT_ROOT/spack-stage"
 EOF
 }
 
@@ -128,14 +133,13 @@ apply_intel_patches
 export PATH="$SPACK_ROOT/bin:$PATH"
 
 log "Detecting native system architecture..."
-export SPACK_TARGET=$(spack arch -t)
-export SPACK_OS=$(spack arch -o)
+export SPACK_TARGET=$(spack -C "${SPACK_USER_CONFIG_PATH}" arch -t)
+export SPACK_OS=$(spack -C "${SPACK_USER_CONFIG_PATH}" arch -o)
 log "Target: ${SPACK_TARGET} | OS: ${SPACK_OS}"
 
 log "Registering foundation GCC..."
-mkdir -p "$SPACK_ROOT/etc/spack"
 log "Debug: Registering foundation GCC as internal compiler..."
-cat > "$SPACK_ROOT/etc/spack/compilers.yaml" <<EOF
+cat > "${SPACK_USER_CONFIG_PATH}/compilers.yaml" <<EOF
 compilers:
 - compiler:
     spec: gcc@${GCC_VER}
@@ -153,11 +157,11 @@ compilers:
 EOF
 
 log "Debug: Purging old packages.yaml..."
-rm -f "$SPACK_ROOT/etc/spack/packages.yaml"
+rm -f "${SPACK_USER_CONFIG_PATH}/packages.yaml"
 
 log "Locking foundational GCC 14 external..."
 log "Debug: Finalizing external package lockdown for GCC..."
-cat > "$SPACK_ROOT/etc/spack/packages.yaml" <<EOF
+cat > "${SPACK_USER_CONFIG_PATH}/packages.yaml" <<EOF
 packages:
   all:
     require:
@@ -170,10 +174,10 @@ EOF
 log "Bootstrapping Intel oneAPI compiler..."
 export TERM=dumb
 log "Debug: Commencing massive compilation phase for Intel oneAPI. This process may take a significant amount of time depending on core count."
-spack --no-color install -j ${BUILD_JOBS:-1} --reuse intel-oneapi-compilers@${INTEL_REQ_VER} < /dev/null
+spack -C "${SPACK_USER_CONFIG_PATH}" --no-color install -j ${BUILD_JOBS:-1} --reuse intel-oneapi-compilers@${INTEL_REQ_VER} < /dev/null
 log "Debug: Intel oneAPI compilation phase completed successfully."
 
-INTEL_INFO=$(spack find --format "{prefix} {version}" intel-oneapi-compilers@${INTEL_REQ_VER} | head -n 1)
+INTEL_INFO=$(spack -C "${SPACK_USER_CONFIG_PATH}" find --format "{prefix} {version}" intel-oneapi-compilers@${INTEL_REQ_VER} | head -n 1)
 export SPACK_INTEL_PATH=$(echo $INTEL_INFO | awk '{print $1}')
 export ONEAPI_VER=$(echo $INTEL_INFO | awk '{print $2}')
 

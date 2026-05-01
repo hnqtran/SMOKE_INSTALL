@@ -1,0 +1,5 @@
+repo:
+  namespace: smoke_v52
+  categories:
+    smoke:
+      description: SMOKE Emissions Modeling System Specialized Recipes

@@ -5,11 +5,12 @@
 set -euo pipefail
 
 # --- 1. Argument Parsing & Defaults ---
-MY_INSTALL_ROOT="${1:-$PWD/gcc_14}"
+MY_INSTALL_ROOT="${1:-$PWD/gcc_compiler_set}"
 [[ "$MY_INSTALL_ROOT" != /* ]] && MY_INSTALL_ROOT="$PWD/$MY_INSTALL_ROOT"
 
-export SPACK_ROOT="$PWD/spack"
-PACKAGES_ROOT="${PWD}/spack-packages"
+PROJECT_ROOT="$PWD"
+export SPACK_ROOT="${PROJECT_ROOT}/spack"
+PACKAGES_ROOT="${PROJECT_ROOT}/spack-packages"
 
 # --- 2. Helper Functions ---
 log() { echo "==> $1"; }
@@ -27,8 +28,8 @@ get_safe_build_jobs() {
 
 setup_spack_and_repos() {
     if [ ! -d "spack" ]; then
-        log "Downloading Spack v1.1.1..."
-        git clone -b v1.1.1 --depth 1 https://github.com/spack/spack.git
+        log "Downloading Spack (latest release)..."
+        git clone -b releases/latest --depth 1 https://github.com/spack/spack.git
     fi
     if [[ ! -d "$PACKAGES_ROOT" ]]; then
         log "Cloning core repository..."
@@ -37,38 +38,42 @@ setup_spack_and_repos() {
     
     source "$SPACK_ROOT/share/spack/setup-env.sh"
     export SPACK_DISABLE_LOCAL_CONFIG=1
+    export SPACK_USER_CACHE_PATH="${PROJECT_ROOT}/.spack_cache_gcc"
+    export SPACK_USER_CONFIG_PATH="${PROJECT_ROOT}/.spack_config_gcc"
+    mkdir -p "${SPACK_USER_CACHE_PATH}" "${SPACK_USER_CONFIG_PATH}"
 
     log "Wiping site and local configurations..."
     mkdir -p "$SPACK_ROOT/etc/spack"
     rm -f "$SPACK_ROOT/etc/spack/"{config,packages,compilers,repos}.yaml
     rm -rf "$SPACK_ROOT/etc/spack/"{site,linux}
 
-    spack repo add --scope site "${PACKAGES_ROOT}/repos/spack_repo/builtin" || true
-    spack repo add --scope site "$PWD" || true
+    spack -C "${SPACK_USER_CONFIG_PATH}" repo add --scope site "${PACKAGES_ROOT}/repos/spack_repo/builtin" || true
+    spack -C "${SPACK_USER_CONFIG_PATH}" repo add --scope site "$PWD" || true
 
     log "Sanitizing mirror configuration..."
-    for m in $(spack mirror list | grep -v "==>" | awk "{print \$1}"); do
-        spack mirror remove "$m" || true
+    for m in $(spack -C "${SPACK_USER_CONFIG_PATH}" mirror list | grep -v "==>" | awk "{print \$1}"); do
+        spack -C "${SPACK_USER_CONFIG_PATH}" mirror remove "$m" || true
     done
-    spack clean -m || true
+    spack -C "${SPACK_USER_CONFIG_PATH}" clean -m || true
 }
 
 init_spack_config() {
     log "Configuring foundation install path..."
-    mkdir -p "$SPACK_ROOT/etc/spack"
-    log "Debug: Generating config.yaml at $SPACK_ROOT/etc/spack/config.yaml..."
-    cat <<EOF > "$SPACK_ROOT/etc/spack/config.yaml"
+    log "Debug: Generating config.yaml at ${SPACK_USER_CONFIG_PATH}/config.yaml..."
+    cat <<EOF > "${SPACK_USER_CONFIG_PATH}/config.yaml"
 config:
   install_tree:
     root: "$MY_INSTALL_ROOT"
     projections:
       all: "{name}-{version}-{compiler.name}-{hash:7}"
+  build_stage:
+    - "$PROJECT_ROOT/spack-stage"
 EOF
 }
 
 bootstrap_gcc_base() {
     log "Ensuring GCC 14 base toolchain..."
-    spack compiler find --scope site
+    spack -C "${SPACK_USER_CONFIG_PATH}" compiler find
     
     local system_gcc=$(command -v gcc || true)
     local gcc_ver=""
@@ -102,11 +107,11 @@ with open(p, 'w') as f: yaml.dump(data, f)
     log "Bootstrapping GCC 14..."
     export TERM=dumb
     log "Debug: Commencing massive compilation phase for GCC 14. This process may take a significant amount of time depending on core count."
-    spack --no-color install -j ${BUILD_JOBS:-1} gcc@14 languages=c,c++,fortran < /dev/null
+    spack -C "${SPACK_USER_CONFIG_PATH}" --no-color install -j ${BUILD_JOBS:-1} gcc@14 languages=c,c++,fortran < /dev/null
     log "Debug: GCC 14 compilation phase completed successfully."
     
-    export SPACK_GCC_PATH=$(spack find --format "{prefix}" gcc@14 | head -n 1)
-    export GCC_VER=$(spack find --format "{version}" gcc@14 | head -n 1)
+    export SPACK_GCC_PATH=$(spack -C "${SPACK_USER_CONFIG_PATH}" find --format "{prefix}" gcc@14 | head -n 1)
+    export GCC_VER=$(spack -C "${SPACK_USER_CONFIG_PATH}" find --format "{version}" gcc@14 | head -n 1)
 }
 
 # --- 3. Main Logic Execution ---
@@ -120,21 +125,21 @@ init_spack_config
 export PATH="$SPACK_ROOT/bin:$PATH"
 
 log "Detecting native system architecture..."
-export SPACK_TARGET=$(spack arch -t)
-export SPACK_OS=$(spack arch -o)
+export SPACK_TARGET=$(spack -C "${SPACK_USER_CONFIG_PATH}" arch -t)
+export SPACK_OS=$(spack -C "${SPACK_USER_CONFIG_PATH}" arch -o)
 log "Target: ${SPACK_TARGET} | OS: ${SPACK_OS}"
 
 # Deterministic Toolchain Discovery
-if spack find gcc@14 >/dev/null 2>&1; then
+if spack -C "${SPACK_USER_CONFIG_PATH}" find gcc@14 >/dev/null 2>&1; then
     log "Found indigenous GCC 14 foundation. Locking paths..."
-    export SPACK_GCC_PATH=$(spack find --format "{prefix}" gcc@14 | head -n 1)
-    export GCC_VER=$(spack find --format "{version}" gcc@14 | head -n 1)
+    export SPACK_GCC_PATH=$(spack -C "${SPACK_USER_CONFIG_PATH}" find --format "{prefix}" gcc@14 | head -n 1)
+    export GCC_VER=$(spack -C "${SPACK_USER_CONFIG_PATH}" find --format "{version}" gcc@14 | head -n 1)
 else
     bootstrap_gcc_base
 fi
 
 # Formally register the bootstrap compiler so Spack can use it natively
-spack compiler find --scope site "$SPACK_GCC_PATH" || true
+spack -C "${SPACK_USER_CONFIG_PATH}" compiler find "$SPACK_GCC_PATH" || true
 
 CURRENT_GCC="$SPACK_GCC_PATH"
 rm -f gcc-latest && ln -s "$CURRENT_GCC" gcc-latest

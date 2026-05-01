@@ -4,15 +4,29 @@ import os
 class Smoke(MakefilePackage):
     """The Sparse Matrix Operator Kernel Emissions (SMOKE) Modeling System."""
 
+    # To add a new version:
+    # 1. Spack method: spack checksum smoke@<VERSION>
+    # 2. Manual: curl -L <URL> | sha256sum
+    # 3. Python:
+    #    python3 -c "
+    #    import hashlib, urllib.request
+    #    url = 'https://github.com/CEMPD/SMOKE/archive/refs/tags/SMOKEv530_Release.tar.gz'
+    #    sha256 = hashlib.sha256(urllib.request.urlopen(url).read()).hexdigest()
+    #    print(sha256)"
+    # Then add: version("5.3.0", url="...", sha256="<hash>")
+
     homepage = "https://www.cmascenter.org/smoke/"
     git = "https://github.com/CEMPD/SMOKE.git"
 
     maintainers = ["cmascenter"]
 
-    version("master", branch="master")
+    version("master", branch="master") # This is the default version used when no version is specified, of if no other version is marked as preferred. 
     version("5.2.1", preferred=False,
             url="https://github.com/CEMPD/SMOKE/archive/refs/tags/SMOKEv521_Sep2025.tar.gz",
             sha256="195aff8e25970ad1cbb051b32cc063bdf5639791e6da31538d2076408ff719df")
+    version("dev",
+            url="file:///proj/ie/proj/SMOKE/htran/SMOKE_MASTER",
+            sha256="0" * 64)
 
     depends_on("c", type="build")
     depends_on("fortran", type="build")
@@ -36,7 +50,7 @@ class Smoke(MakefilePackage):
             eflag    = "-ffixed-line-length-132 -fno-backslash -fallow-argument-mismatch"
         elif 'oneapi' in name or 'intel' in name:
             eflag    = "-extend-source 132 -zero"
-        elif 'aocc' in name:
+        elif 'aocc' in name or 'clang' in name or 'llvm' in name:
             eflag    = "-ffixed-line-length-132 -fno-backslash -mcmodel=medium"
         else:
             eflag    = ""
@@ -59,8 +73,8 @@ IODIR   = $(IOBASE)/ioapi
 IOINC   = $(IOBASE)/include/fixed132
 IOBIN   = lib
 
-F90 = {spack_fc}
-CC  = {spack_cc}
+F90 = {self.compiler.fc}
+CC  = {self.compiler.cc}
 
 IFLAGS = -I$(IOINC) -I$(INCDIR) -I$(OBJDIR) -I{ioapi}/lib -I{ioapi}/{ioapi_bin} -I{netcdff}/include
 EFLAG = {eflag}

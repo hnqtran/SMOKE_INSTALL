@@ -1,148 +1,273 @@
 #!/bin/bash
-# local_build_aocc.sh - Hardened Hybrid AOCC Build (Dynamic Enclave)
+# Optimized for Portability and AOCC Performance using specialized project recipes
+
 set -euo pipefail
 
 log() { echo "==> $1"; }
 
-# --- 1. Environment Discovery ---
-export SPACK_GCC_PATH="/proj/ie/proj/SMOKE/htran/SMOKE_SPACK/local_build/gcc_14/gcc-14.3.0-llvm-5ypbe3b"
-export GCC_VER="14.3.0"
+# --- 0. Argument Parsing ---
+CLEAN_BUILD=false
+REBUILD_IOAPI=false
+REBUILD_SMOKE=false
+SMOKE_VERSION=""
 
-# --- 2. Stage 1: Legacy AOCC Bootstrap ---
-if [ ! -L "aocc-latest" ]; then
-    log "Stage 1: Bootstrapping AOCC using legacy engine..."
-    chmod +x build_foundation_aocc.sh
-    ./build_foundation_aocc.sh
-else
-    log "AOCC Toolchain already exists in aocc-latest. Skipping Stage 1."
-fi
+for arg in "$@"; do
+    case $arg in
+        --rebuild) CLEAN_BUILD=true ;;
+        --ioapi)       REBUILD_IOAPI=true ;;
+        --smoke)       REBUILD_SMOKE=true ;;
+        --smoke-version=*) SMOKE_VERSION="${arg#*=}" ;;
+    esac
+done
 
-AOCC_PREFIX=$(readlink -f aocc-latest)
-log "AOCC Toolchain established at $AOCC_PREFIX"
+# --- 0a. Dynamic Enclave Variables ---
+COMPILER_NAME="aocc"
+ENCLAVE_SUFFIX="${COMPILER_NAME}_enclave"
+STACK_SUFFIX="${COMPILER_NAME}"
 
-# --- 3. Stage 2: Unified Dynamic Enclave Build ---
-export MY_INSTALL_ROOT="$PWD/install_aocc_stack"
-mkdir -p "$MY_INSTALL_ROOT/lib" "$MY_INSTALL_ROOT/include" "$MY_INSTALL_ROOT/bin"
+# --- 1. Paths & Versions ---
+PROJECT_ROOT="$PWD"
+SPACK_ROOT="${PROJECT_ROOT}/spack"
+ENV_NAME="smoke-${COMPILER_NAME}-enclave"
+MY_INSTALL_ROOT="${PROJECT_ROOT}/install_${STACK_SUFFIX}"
 
-export BIN=Linux2_x86_64aoccflang
-export CC="$AOCC_PREFIX/bin/clang"
-export CXX="$AOCC_PREFIX/bin/clang++"
-export FC="$AOCC_PREFIX/bin/flang"
-export F77="$AOCC_PREFIX/bin/flang"
-
-export OPT_FLAGS="-O3 -march=native -mtune=native --gcc-toolchain=${SPACK_GCC_PATH} -B${SPACK_GCC_PATH}/lib/gcc/x86_64-pc-linux-gnu/${GCC_VER}"
-export CFLAGS="$OPT_FLAGS -fPIC"
-export CXXFLAGS="$OPT_FLAGS -fPIC"
-export FFLAGS="$OPT_FLAGS -fPIC"
-export BASE_LDFLAGS="-L$MY_INSTALL_ROOT/lib -Wl,-rpath,$MY_INSTALL_ROOT/lib -L${SPACK_GCC_PATH}/lib64 -Wl,-rpath,${SPACK_GCC_PATH}/lib64"
-
-# --- 4. HDF5 ---
-if [ ! -f "$MY_INSTALL_ROOT/lib/libhdf5.so" ]; then
-    log "Compiling HDF5..."
-    cd "$MY_INSTALL_ROOT"
-    rm -rf hdf5-hdf5-1_14_3 hdf5-1.14.3.tar.gz
-    wget https://github.com/HDFGroup/hdf5/archive/refs/tags/hdf5-1_14_3.tar.gz -O hdf5-1.14.3.tar.gz
-    tar -xf hdf5-1.14.3.tar.gz
-    cd hdf5-hdf5-1_14_3
-    ./configure --prefix="$MY_INSTALL_ROOT" --enable-fortran --enable-cxx --enable-shared --enable-static --without-szlib --disable-tests
-    make -j$(nproc)
-    make install
-    cd ..
-else
-    log "HDF5 already exists. Skipping."
-fi
-
-# --- 5. NetCDF-C ---
-if [ ! -f "$MY_INSTALL_ROOT/lib/libnetcdf.so" ]; then
-    log "Compiling NetCDF-C..."
-    cd "$MY_INSTALL_ROOT"
-    rm -rf netcdf-c-4.9.2 netcdf-c-4.9.2.tar.gz
-    wget https://github.com/Unidata/netcdf-c/archive/refs/tags/v4.9.2.tar.gz -O netcdf-c-4.9.2.tar.gz
-    tar -xf netcdf-c-4.9.2.tar.gz
-    cd netcdf-c-4.9.2
-    CPPFLAGS="-I$MY_INSTALL_ROOT/include" ./configure --prefix="$MY_INSTALL_ROOT" --enable-shared --enable-static --disable-dap --disable-nczarr --disable-byterange --disable-s3
-    make -j$(nproc)
-    make install
-    cd ..
-else
-    log "NetCDF-C already exists. Skipping."
-fi
-
-# --- 6. NetCDF-Fortran ---
-if [ ! -f "$MY_INSTALL_ROOT/lib/libnetcdff.so" ]; then
-    log "Compiling NetCDF-Fortran..."
-    cd "$MY_INSTALL_ROOT"
-    rm -rf netcdf-fortran-4.6.1 netcdf-fortran-4.6.1.tar.gz
-    wget https://github.com/Unidata/netcdf-fortran/archive/refs/tags/v4.6.1.tar.gz -O netcdf-fortran-4.6.1.tar.gz
-    tar -xf netcdf-fortran-4.6.1.tar.gz
-    cd netcdf-fortran-4.6.1
-    LDFLAGS="$BASE_LDFLAGS" CPPFLAGS="-I$MY_INSTALL_ROOT/include" ./configure --prefix="$MY_INSTALL_ROOT" --enable-shared --enable-static
-    sed -i 's/wl=""/wl="-Wl,"/g' libtool
-    sed -i 's/\$wl-soname \$wl\$soname/\$wl-soname,\$soname/g' libtool
-    sed -i 's/\$wl--whole-archive \$wl/\$wl--whole-archive,/g' libtool
-    sed -i 's/\$wl--no-whole-archive \$wl/\$wl--no-whole-archive,/g' libtool
-    make -j$(nproc)
-    make install
-    cd ..
-else
-    log "NetCDF-Fortran already exists. Skipping."
-fi
-
-# --- 7. IOAPI & M3Tools ---
-if [ ! -f "$MY_INSTALL_ROOT/lib/libioapi.a" ]; then
-    log "Compiling IOAPI & M3Tools..."
-    cd "$MY_INSTALL_ROOT"
-    if [ ! -d "ioapi_v32" ]; then
-        git clone --depth 1 https://github.com/cjcoats/ioapi-3.2.git ioapi_v32
+# --- 1a. Infer Default SMOKE Version (if not specified) ---
+if [ -z "$SMOKE_VERSION" ]; then
+    SMOKE_VERSION=$(grep -v '^[[:space:]]*#' "${PROJECT_ROOT}/packages/smoke/package.py" | grep 'version.*preferred=True' | sed -E 's/.*version\("([^"]+)".*/\1/' | head -1 || true)
+    if [ -z "$SMOKE_VERSION" ]; then
+        SMOKE_VERSION=$(grep -v '^[[:space:]]*#' "${PROJECT_ROOT}/packages/smoke/package.py" | grep 'version(' | sed -E 's/.*version\("([^"]+)".*/\1/' | head -1 || true)
     fi
-    cd ioapi_v32
-    mkdir -p "$BIN"
-    sed -i "s|aocc = .*|aocc = $AOCC_PREFIX/bin|g" ioapi/Makeinclude.Linux2_x86_64aoccflang
-    sed -i "s|^ARCHFLAGS =|ARCHFLAGS = $OPT_FLAGS -fPIC |g" ioapi/Makeinclude.Linux2_x86_64aoccflang
-    sed -i "s|^ARCHLIB.*=.*|ARCHLIB = -lm -lpthread -lc|g" ioapi/Makeinclude.Linux2_x86_64aoccflang
-    cd ioapi
-    sed -i "s|^BASEDIR.*=.*|BASEDIR = $(dirname "$PWD")|g" Makefile.nocpl
-    make -f Makefile.nocpl OBJDIR="$MY_INSTALL_ROOT/ioapi_v32/$BIN" BIN="$BIN"
-    cp "../$BIN/libioapi.a" "$MY_INSTALL_ROOT/lib/"
-    cp "../$BIN"/*.mod "$MY_INSTALL_ROOT/include/"
-    cd ../m3tools
-    sed -i "s|^BASEDIR.*=.*|BASEDIR = $(dirname "$PWD")|g" Makefile.nocpl
-    sed -i "s|^ LIBS = .*| LIBS = -L\${OBJDIR} -lioapi -lnetcdff -lnetcdf \$(OMPLIBS) \$(ARCHLIB) \$(ARCHLIBS)|g" Makefile.nocpl
-    make -f Makefile.nocpl OBJDIR="$MY_INSTALL_ROOT/ioapi_v32/$BIN" BIN="$BIN" LFLAGS="$BASE_LDFLAGS"
-    cp "$MY_INSTALL_ROOT/ioapi_v32/$BIN"/* "$MY_INSTALL_ROOT/bin/" || true
-    cd ..
-else
-    log "IOAPI/M3Tools already built. Skipping."
+    log "SMOKE version not specified, inferred default: ${SMOKE_VERSION}"
 fi
 
-# --- 8. SMOKE ---
-if [ ! -f "$MY_INSTALL_ROOT/bin/smkinven" ]; then
-    log "Compiling SMOKE (Dynamic)..."
-    cd "$MY_INSTALL_ROOT"
-    if [ ! -d "smoke" ]; then
-        git clone --depth 1 https://github.com/CEMPD/SMOKE.git smoke
+# --- 1b. Expected toolchain locations (via stable symlinks) ---
+SPACK_GCC_PATH="${PROJECT_ROOT}/gcc-latest"
+GCC_VER="14.3.0"
+AOCC_PREFIX="${PROJECT_ROOT}/aocc-latest"
+
+# --- 1a. Toolchain Validation ---
+if [ ! -d "${SPACK_GCC_PATH}" ]; then
+    log "ERROR: GCC 14 Toolchain NOT found at ${SPACK_GCC_PATH}"
+    log "Please run: ./build_foundation_gcc.sh"
+    exit 1
+fi
+
+if [ ! -d "${AOCC_PREFIX}" ]; then
+    log "ERROR: AOCC 5.1.0 Toolchain NOT found at ${AOCC_PREFIX}"
+    log "Please run: ./build_foundation_aocc.sh"
+    exit 1
+fi
+
+log "Toolchain validation successful."
+
+if [ "$CLEAN_BUILD" = true ]; then
+    log "Performing clean build reset..."
+    rm -rf "${MY_INSTALL_ROOT}"
+    rm -rf "${PROJECT_ROOT}/.spack_cache_${ENCLAVE_SUFFIX}" "${PROJECT_ROOT}/.spack_config_${ENCLAVE_SUFFIX}"
+    log "Removing Spack environment: ${ENV_NAME}"
+    rm -rf "${SPACK_ROOT}/var/spack/environments/${ENV_NAME}"
+fi
+
+# --- 2. Initialize Spack & Build Foundations ---
+if [ ! -d "${SPACK_ROOT}" ]; then
+    log "Spack not found at ${SPACK_ROOT}. Cloning fresh Spack..."
+    git clone -b releases/latest https://github.com/spack/spack.git "${SPACK_ROOT}"
+fi
+
+# NOTE: External spack-packages repository is bypassed in V2
+# if [ ! -d "${PROJECT_ROOT}/spack-packages" ]; then
+#     log "Cloning additional spack-packages repository..."
+#     git clone -b develop https://github.com/spack/spack-packages.git "${PROJECT_ROOT}/spack-packages"
+# fi
+
+if [ -f "${SPACK_ROOT}/share/spack/setup-env.sh" ]; then
+    source "${SPACK_ROOT}/share/spack/setup-env.sh"
+    export SPACK_DISABLE_LOCAL_CONFIG=1
+    
+    # Isolate site-level configuration to prevent leaks from problematic site/packages.yaml
+    export SPACK_SYSTEM_CONFIG_PATH="${PROJECT_ROOT}/.spack_site_config_empty"
+    mkdir -p "${SPACK_SYSTEM_CONFIG_PATH}"
+    
+    export SPACK_USER_CACHE_PATH="${PROJECT_ROOT}/.spack_cache_${ENCLAVE_SUFFIX}"
+    export SPACK_USER_CONFIG_PATH="${PROJECT_ROOT}/.spack_config_${ENCLAVE_SUFFIX}"
+    mkdir -p "${SPACK_USER_CACHE_PATH}" "${SPACK_USER_CONFIG_PATH}"
+    
+    # Ensure our custom repo is added (priority for our local recipes)
+    if ! spack -C "${SPACK_USER_CONFIG_PATH}" repo list | grep -q "smoke_v52"; then
+        log "Adding authoritative local package repository..."
+        spack -C "${SPACK_USER_CONFIG_PATH}" repo add "${PROJECT_ROOT}/packages" || true
     fi
-    cd smoke/src
-    git checkout Makefile Makeinclude
+
+    log "Configuring enclave install path and local build stage..."
+    cat <<EOF > "${SPACK_USER_CONFIG_PATH}/config.yaml"
+config:
+  install_tree:
+    root: "$MY_INSTALL_ROOT"
+    projections:
+      all: "{name}-{version}-{compiler.name}-{hash:7}"
+  build_stage:
+    - "$PROJECT_ROOT/spack-stage"
+EOF
     
-    export SMK_HOME="$(dirname "$PWD")"
-    export IOBASE="$MY_INSTALL_ROOT/ioapi_v32"
-    export IODIR="$IOBASE/ioapi"
-    export IOBIN="$IOBASE/$BIN"
-    export IOINC="$IODIR/fixed_src"
-    mkdir -p "$SMK_HOME/$BIN"
+    # 1. Register existing AOCC and GCC as compilers
+    log "Registering existing AOCC and GCC toolchains..."
     
-    sed -i "s|^BASEDIR.*=.*|BASEDIR = $PWD|g" Makeinclude
-    sed -i "s|^IOBASE.*=.*|IOBASE = $IOBASE|g" Makeinclude
-    sed -i "s|^ EFLAG.*=.*| EFLAG = -ffixed-line-length-132 -fno-backslash|g" Makeinclude
-    sed -i "s|^LDFLAGS.*=.*|LDFLAGS = \${IFLAGS} \${DEFINEFLAGS} \${ARCHFLAGS} $BASE_LDFLAGS|g" Makeinclude
-    sed -i "s|^ARCHFLAGS.*=.*|ARCHFLAGS = $OPT_FLAGS -fPIC|g" $IODIR/Makeinclude.$BIN
+    # Detect architecture for manual compiler config
+    SPACK_TARGET=$(spack -C "${SPACK_USER_CONFIG_PATH}" arch -t)
+    SPACK_OS=$(spack -C "${SPACK_USER_CONFIG_PATH}" arch -o)
     
-    unset LDFLAGS
-    make BIN=$BIN
-    cp "$SMK_HOME/$BIN"/* "$MY_INSTALL_ROOT/bin/" || true
+    cat > "${SPACK_USER_CONFIG_PATH}/compilers.yaml" <<EOF
+compilers:
+- compiler:
+    spec: gcc@${GCC_VER}
+    paths:
+      cc: ${SPACK_GCC_PATH}/bin/gcc
+      cxx: ${SPACK_GCC_PATH}/bin/g++
+      f77: ${SPACK_GCC_PATH}/bin/gfortran
+      fc: ${SPACK_GCC_PATH}/bin/gfortran
+    flags: {}
+    operating_system: ${SPACK_OS}
+    target: ${SPACK_TARGET}
+    modules: []
+    environment: {}
+    extra_rpaths: []
+- compiler:
+    spec: aocc@5.1.0
+    paths:
+      cc: ${AOCC_PREFIX}/bin/clang
+      cxx: ${AOCC_PREFIX}/bin/clang++
+      f77: ${AOCC_PREFIX}/bin/flang
+      fc: ${AOCC_PREFIX}/bin/flang
+    flags: {}
+    operating_system: ${SPACK_OS}
+    target: ${SPACK_TARGET}
+    modules: []
+    environment: {}
+    extra_rpaths: []
+EOF
+
+    # 1b. Exclude the 'aocc' package to avoid concretization conflict with the compiler
+    # We must do this at the environment level to override any site/user externals
+    log "Enforcing enclave policy: Ignoring 'aocc' package..."
+    
+    # Create/Re-create environment to clear stale metadata
+    if spack -C "${SPACK_USER_CONFIG_PATH}" env list | grep -q "${ENV_NAME}"; then
+        log "Purging stale Spack environment: ${ENV_NAME}"
+        spack -C "${SPACK_USER_CONFIG_PATH}" env remove -y "${ENV_NAME}" || true
+    fi
+    
+    log "Initializing fresh Spack environment: ${ENV_NAME}"
+    # Mask host compilers from Spack's discovery path early
+    SAFE_PATH=$(echo "$PATH" | tr ":" "\n" | grep -vE "gcc|llvm|aocc|intel" | tr "\n" ":" | sed 's/:$//')
+
+    log "Identifying system build tools (cmake, gmake, etc.)..."
+    env PATH="$SAFE_PATH" spack -C "${SPACK_USER_CONFIG_PATH}" external find --scope site cmake gmake pkgconf autoconf automake m4 libtool perl python
+    
+    spack -C "${SPACK_USER_CONFIG_PATH}" env create "${ENV_NAME}"
+    
+    log "Configuring spack.yaml for AOCC enclave..."
+    ENV_DIR="${SPACK_ROOT}/var/spack/environments/${ENV_NAME}"
+    cat <<EOF > "${ENV_DIR}/spack.yaml"
+spack:
+  compilers:
+  - compiler:
+      spec: gcc@${GCC_VER}
+      paths:
+        cc: ${SPACK_GCC_PATH}/bin/gcc
+        cxx: ${SPACK_GCC_PATH}/bin/g++
+        f77: ${SPACK_GCC_PATH}/bin/gfortran
+        fc: ${SPACK_GCC_PATH}/bin/gfortran
+      operating_system: ${SPACK_OS}
+      target: ${SPACK_TARGET}
+      modules: []
+      environment: {}
+      extra_rpaths: []
+  - compiler:
+      spec: aocc@5.1.0
+      paths:
+        cc: ${AOCC_PREFIX}/bin/clang
+        cxx: ${AOCC_PREFIX}/bin/clang++
+        f77: ${AOCC_PREFIX}/bin/flang
+        fc: ${AOCC_PREFIX}/bin/flang
+      operating_system: ${SPACK_OS}
+      target: ${SPACK_TARGET}
+      modules: []
+      environment: {}
+      extra_rpaths: []
+  packages:
+    all:
+      require: "%aocc@5.1.0"
+      providers:
+        c: [gcc]
+        cxx: [gcc]
+        fortran: [gcc]
+    aocc:
+      buildable: false
+      externals: []
+    gcc:
+      externals: []
+      buildable: false
+    llvm:
+      buildable: false
+    intel-oneapi-compilers:
+      buildable: false
+  specs: []
+  view: true
+  concretizer:
+    unify: when_possible
+EOF
+    
+    # 6. Build foundations (skip if only rebuilding IOAPI or SMOKE)
+    if [ "$REBUILD_IOAPI" = false ] && [ "$REBUILD_SMOKE" = false ]; then
+        log "Building foundation layer (curl, zlib, hdf5, netcdf-c, netcdf-fortran)..."
+        # Ensure foundations are installed with AOCC via local recipes
+        # Note: Using variants that match 'ioapi' and 'smoke' requirements to avoid redundant builds
+        spack -C "${SPACK_USER_CONFIG_PATH}" -e "${ENV_NAME}" add curl %aocc@5.1.0
+        spack -C "${SPACK_USER_CONFIG_PATH}" -e "${ENV_NAME}" add zlib %aocc@5.1.0
+        spack -C "${SPACK_USER_CONFIG_PATH}" -e "${ENV_NAME}" add hdf5+shared~mpi+cxx+fortran+hl %aocc@5.1.0
+        spack -C "${SPACK_USER_CONFIG_PATH}" -e "${ENV_NAME}" add netcdf-c~mpi+shared~dap %aocc@5.1.0
+        spack -C "${SPACK_USER_CONFIG_PATH}" -e "${ENV_NAME}" add netcdf-fortran+shared %aocc@5.1.0
+        
+        log "Performing foundation installation (this may take time)..."
+        env PATH="$SAFE_PATH" TERM=dumb \
+            spack -C "${SPACK_USER_CONFIG_PATH}" --no-color -e "${ENV_NAME}" install --fail-fast < /dev/null
+    else
+        log "Skipping foundation build (using existing installations)..."
+    fi
+    
+    # 7. Build IOAPI and SMOKE
+    # Force selective rebuild by uninstalling and re-adding flagged packages
+    if [ "$REBUILD_IOAPI" = true ]; then
+        log "Forcing IOAPI rebuild: removing from environment and uninstalling..."
+        spack -C "${SPACK_USER_CONFIG_PATH}" -e "${ENV_NAME}" remove ioapi >/dev/null 2>&1 || true
+        spack -C "${SPACK_USER_CONFIG_PATH}" uninstall -f -y ioapi >/dev/null 2>&1 || true
+        log "Re-adding IOAPI..."
+        spack -C "${SPACK_USER_CONFIG_PATH}" -e "${ENV_NAME}" add ioapi %aocc@5.1.0
+    fi
+    if [ "$REBUILD_SMOKE" = true ]; then
+        log "Forcing SMOKE rebuild: removing from environment and uninstalling..."
+        spack -C "${SPACK_USER_CONFIG_PATH}" -e "${ENV_NAME}" remove smoke >/dev/null 2>&1 || true
+        spack -C "${SPACK_USER_CONFIG_PATH}" uninstall -f -y smoke >/dev/null 2>&1 || true
+        log "Re-adding SMOKE version ${SMOKE_VERSION}..."
+        spack -C "${SPACK_USER_CONFIG_PATH}" -e "${ENV_NAME}" add smoke@${SMOKE_VERSION} %aocc@5.1.0
+    fi
+    
+    # If no rebuild flags, ensure both are in specs
+    if [ "$REBUILD_IOAPI" = false ] && [ "$REBUILD_SMOKE" = false ]; then
+        log "Ensuring IOAPI and SMOKE are in environment..."
+        spack -C "${SPACK_USER_CONFIG_PATH}" -e "${ENV_NAME}" add ioapi %aocc@5.1.0
+        spack -C "${SPACK_USER_CONFIG_PATH}" -e "${ENV_NAME}" add smoke@${SMOKE_VERSION} %aocc@5.1.0
+    fi
+    
+    log "Installing packages (rebuilding only flagged packages)..."
+    env PATH="$SAFE_PATH" TERM=dumb \
+        spack -C "${SPACK_USER_CONFIG_PATH}" --no-color -e "${ENV_NAME}" install --fail-fast < /dev/null
 else
-    log "SMOKE already built. Skipping."
+    log "Error: Spack not found at ${SPACK_ROOT}"
+    exit 1
 fi
 
-log "Dynamic Enclave Build Complete in $MY_INSTALL_ROOT"
+log "Spack-Driven Unified AOCC Enclave Build Complete!"
+log "Authoritative Enclave: ${MY_INSTALL_ROOT}"
+log "Foundation Layer: ${SPACK_ROOT}/var/spack/environments/${ENV_NAME}/.spack-env/view"
+

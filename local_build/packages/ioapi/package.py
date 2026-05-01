@@ -57,14 +57,14 @@ class Ioapi(MakefilePackage):
         makeinc = FileFilter(makeinc_path)
         # Use actual compiler binary paths to avoid recursive variable expansion
         # Inject AOCC-specific flags to resolve relocation errors
-        if 'aocc' in self.spec.compiler.name.lower() or self.spec.satisfies('%aocc'):
+        if 'aocc' in self.spec.compiler.name.lower() or self.spec.satisfies('%aocc') or 'clang' in self.spec.compiler.name.lower() or 'llvm' in self.spec.compiler.name.lower():
             env_flags = ' -fPIC -mcmodel=medium'
         else:
             env_flags = ''
 
-        makeinc.filter(r'^CC\s*=.*',  f'CC  = {spack_cc}{env_flags}')
-        makeinc.filter(r'^CXX\s*=.*', f'CXX = {spack_cxx}{env_flags}')
-        makeinc.filter(r'^FC\s*=.*',  f'FC  = {spack_fc}{env_flags}')
+        makeinc.filter(r'^CC\s*=.*',  f'CC  = {self.compiler.cc}{env_flags}')
+        makeinc.filter(r'^CXX\s*=.*', f'CXX = {self.compiler.cxx}{env_flags}')
+        makeinc.filter(r'^FC\s*=.*',  f'FC  = {self.compiler.fc}{env_flags}')
 
         if 'oneapi' in spec.compiler.name.lower() or 'intel' in spec.compiler.name.lower():
             # Resolve multiple definition errors for iargc/getarg with Intel ifx
@@ -127,9 +127,27 @@ class Ioapi(MakefilePackage):
         env = os.environ.copy()
         env['MAKEFLAGS'] = '-j1'
         BIN = self.get_ioapi_bin(spec)
-        print(f"DEBUG: Using BIN={BIN} for compiler={spec.compiler.name}")
-        # Explicitly pass BIN to ensure it overrides defaults without modifying the source Makefile
-        make(f'BIN={BIN}', '-j1', extra_env=env)
+        
+        # Extract library directories from dependencies for explicit linking (especially for AOCC/ld.lld)
+        ncf_lib_dirs = spec["netcdf-fortran"].libs.directories
+        nc_lib_dirs = spec["netcdf-c"].libs.directories
+        hdf5_lib_dirs = spec["hdf5"].libs.directories
+        zlib_lib_dirs = spec["zlib"].libs.directories
+        
+        # Build LFLAGS with all library paths and RPATH for runtime discovery
+        lib_flags = []
+        rpath_flags = []
+        for lib_dir in ncf_lib_dirs + nc_lib_dirs + hdf5_lib_dirs + zlib_lib_dirs:
+            lib_flags.append(f'-L{lib_dir}')
+            rpath_flags.append(f'-Wl,-rpath,{lib_dir}')
+        
+        lflags = ' '.join(lib_flags + rpath_flags)
+        
+        # Build NETCDF_LIB for NetCDF C library specifically
+        nc_lib_flag = ' '.join([f'-L{d}' for d in nc_lib_dirs]) + ' -lnetcdf'
+        
+        # Explicitly pass BIN and library paths (with RPATH) to ensure they override defaults
+        make(f'BIN={BIN}', f'LFLAGS={lflags}', f'NETCDF_LIB={nc_lib_flag}', '-j1', extra_env=env)
 
     def install(self, spec, prefix):
         BIN = self.get_ioapi_bin(spec)
