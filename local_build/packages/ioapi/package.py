@@ -12,6 +12,7 @@ class Ioapi(MakefilePackage):
     depends_on("cxx", type="build")
     depends_on("fortran", type="build")
     variant("openmp", default=False, description="Build with OpenMP support")
+    variant("large", default=False, description="Build expanded PARMS3 version for CMAQ-DDM/ISAM (ioapi-3.2-large)")
 
     # Generic dependencies (use +shared and +fortran for toolchain consistency)
     depends_on("hdf5+shared~mpi+szip+cxx+fortran+hl")
@@ -33,7 +34,15 @@ class Ioapi(MakefilePackage):
         os.symlink("Makefile.template", "Makefile")
         BIN = self.get_ioapi_bin(spec)
         temp_source_dir = self.stage.source_path
-        
+
+        # For the +large variant, replace PARMS3.EXT with the expanded version
+        if spec.satisfies("+large"):
+            import shutil
+            shutil.copy(
+                os.path.join(temp_source_dir, 'ioapi', 'PARMS3-LARGE.EXT'),
+                os.path.join(temp_source_dir, 'ioapi', 'PARMS3.EXT')
+            )
+
         makefile = FileFilter("Makefile")
         # Ensure correct BASEDIR and INSTALL paths are set
         makefile.filter(r'^#\s*(BASEDIR\s*=\s*\${PWD})', f'BASEDIR = {temp_source_dir}')
@@ -111,7 +120,10 @@ class Ioapi(MakefilePackage):
             # For GCC/Intel, explicitly enforce FSTR_L=int to match SMOKE defaults
             # This ensures consistency even if the base Makeinclude changes.
             makeinc_other = os.path.join(temp_source_dir, 'ioapi', f'Makeinclude.{BIN}')
-            filter_file(r'^ARCHFLAGS\s*=.*', 'ARCHFLAGS = -DAUTO_ARRAYS=1 -DF90=1 -DFLDMN=1 -DFSTR_L=int -DIOAPI_NO_STDOUT=1 -DNEED_ARGS=1', makeinc_other)
+            if 'oneapi' in spec.compiler.name.lower() or 'intel' in spec.compiler.name.lower():
+                filter_file(r'^ARCHFLAGS\s*=.*', 'ARCHFLAGS = -DAUTO_ARRAYS=1 -DF90=1 -DFLDMN=1 -DFSTR_L=int -DIOAPI_NO_STDOUT=1', makeinc_other)
+            else:
+                filter_file(r'^ARCHFLAGS\s*=.*', 'ARCHFLAGS = -DAUTO_ARRAYS=1 -DF90=1 -DFLDMN=1 -DFSTR_L=int -DIOAPI_NO_STDOUT=1 -DNEED_ARGS=1', makeinc_other)
         
         # Fix OpenMP scoping and continuation issues
         if spec.satisfies("+openmp"):

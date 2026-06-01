@@ -12,11 +12,13 @@ REBUILD_SMOKE=false
 SMOKE_VERSION=""
 SMOKE_VERSION_EXPLICIT=false
 SMOKE_COMPONENTS=""
+REBUILD_IOAPI_LARGE=false
 
 for arg in "$@"; do
     case $arg in
         --rebuild) CLEAN_BUILD=true ;;
         --ioapi)       REBUILD_IOAPI=true ;;
+        --ioapi-large) REBUILD_IOAPI_LARGE=true ;;
         --smoke)       REBUILD_SMOKE=true ;;
         --smoke-version=*) SMOKE_VERSION="${arg#*=}"; SMOKE_VERSION_EXPLICIT=true ;;
         --smoke-*) 
@@ -307,6 +309,13 @@ EOF
         log "Re-adding IOAPI with ${IOAPI_VARIANT}..."
         spack -C "${SPACK_USER_CONFIG_PATH}" -e "${ENV_NAME}" add ioapi${IOAPI_VARIANT} %aocc@${AOCC_VER}
     fi
+    if [ "$REBUILD_IOAPI_LARGE" = true ]; then
+        log "Forcing IOAPI-large rebuild: removing from environment and uninstalling..."
+        spack -C "${SPACK_USER_CONFIG_PATH}" -e "${ENV_NAME}" remove "ioapi${IOAPI_VARIANT}+large" >/dev/null 2>&1 || true
+        spack -C "${SPACK_USER_CONFIG_PATH}" uninstall -f -y "ioapi+large" >/dev/null 2>&1 || true
+        log "Re-adding IOAPI-large with ${IOAPI_VARIANT}+large..."
+        spack -C "${SPACK_USER_CONFIG_PATH}" -e "${ENV_NAME}" add "ioapi${IOAPI_VARIANT}+large" %aocc@${AOCC_VER}
+    fi
     if [ "$REBUILD_SMOKE" = true ]; then
         log "Forcing SMOKE rebuild: removing from environment and uninstalling..."
         spack -C "${SPACK_USER_CONFIG_PATH}" -e "${ENV_NAME}" remove smoke@=${SMOKE_VERSION} >/dev/null 2>&1 || true
@@ -331,6 +340,9 @@ EOF
     # We remove existing entries first to ensure variant changes (like switching from +openmp to ~openmp) are respected.
     log "Ensuring IOAPI and SMOKE are in environment..."
     spack -C "${SPACK_USER_CONFIG_PATH}" -e "${ENV_NAME}" add ioapi${IOAPI_VARIANT} %aocc@${AOCC_VER}
+    if [ "$REBUILD_IOAPI_LARGE" = true ]; then
+        spack -C "${SPACK_USER_CONFIG_PATH}" -e "${ENV_NAME}" add "ioapi${IOAPI_VARIANT}+large" %aocc@${AOCC_VER}
+    fi
     export SMOKE_BUILD_COMPONENTS="${SMOKE_COMPONENTS}"
     for sv in ${SMOKE_VERSION}; do
         # Remove existing entries for THIS specific version to ensure variant changes 
@@ -373,6 +385,22 @@ EOF
             log "  Created simple symlink: ${IOAPI_LINK_NAME} -> ${I_DIR}"
         fi
 
+        # 1b. Symlink for IOAPI-large (only when --ioapi-large was requested)
+        if [ "$REBUILD_IOAPI_LARGE" = true ]; then
+            IOAPI_LARGE_PATHS=$(spack -C "${SPACK_USER_CONFIG_PATH}" -e "${ENV_NAME}" location -i "ioapi+large" %aocc@${AOCC_VER} 2>/dev/null || true)
+            if [ -n "$IOAPI_LARGE_PATHS" ]; then
+                mapfile -t IOAPI_LARGE_PATH_ARR <<< "$IOAPI_LARGE_PATHS"
+                IL_PATH=$(ls -dt "${IOAPI_LARGE_PATH_ARR[@]}" 2>/dev/null | head -n 1)
+                IL_DIR=$(basename "$IL_PATH")
+                IOAPI_LARGE_LINK_NAME="ioapi-large"
+                if [ "${IOAPI_VARIANT}" = "+openmp" ]; then
+                    IOAPI_LARGE_LINK_NAME="ioapi-omp-large"
+                fi
+                ln -sfn "$IL_DIR" "${IOAPI_LARGE_LINK_NAME}"
+                log "  Created simple symlink: ${IOAPI_LARGE_LINK_NAME} -> ${IL_DIR}"
+            fi
+        fi
+
         # 2. Symlinks for SMOKE (explicitly for each requested version)
         for sv in ${SMOKE_VERSION}; do
             # Resolve the spec matching the installation
@@ -399,6 +427,25 @@ EOF
                 fi
             else
                 log "  Warning: Could not locate installation path for ${SPEC_TO_LINK}"
+            fi
+        done
+
+        # 3. Symlinks for foundation libraries (hdf5, netcdf-c, netcdf-fortran)
+        for pkg in hdf5 netcdf-c netcdf-fortran; do
+            P_PATHS=$(spack -C "${SPACK_USER_CONFIG_PATH}" -e "${ENV_NAME}" location -i "${pkg}" %aocc@${AOCC_VER} 2>/dev/null || true)
+            if [ -n "$P_PATHS" ]; then
+                mapfile -t P_PATH_ARR <<< "$P_PATHS"
+                P_PATH=$(ls -dt "${P_PATH_ARR[@]}" 2>/dev/null | head -n 1)
+                P_DIR=$(basename "$P_PATH")
+                P_STABLE=$(echo "$P_DIR" | sed -E 's/-[^-]+-[a-z0-9]{7,}$//')
+                if [ "$P_STABLE" != "$P_DIR" ]; then
+                    ln -sfn "$P_DIR" "$P_STABLE"
+                    log "  Created symlink for ${pkg}: ${P_STABLE} -> ${P_DIR}"
+                else
+                    log "  Warning: Could not determine stable symlink name from '${P_DIR}' (regex matched nothing)"
+                fi
+            else
+                log "  Warning: Could not locate installation path for ${pkg}"
             fi
         done
         popd > /dev/null
