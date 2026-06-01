@@ -8,6 +8,16 @@ set -euo pipefail
 MY_INSTALL_ROOT="${1:-$PWD/gcc_compiler_set}"
 [[ "$MY_INSTALL_ROOT" != /* ]] && MY_INSTALL_ROOT="$PWD/$MY_INSTALL_ROOT"
 
+# Parse optional --num-jobs argument
+BUILD_JOBS=""
+for arg in "$@"; do
+    case $arg in
+        --num-jobs=*)
+            BUILD_JOBS="${arg#*=}"
+            ;;
+    esac
+done
+
 PROJECT_ROOT="$PWD"
 export SPACK_ROOT="${PROJECT_ROOT}/spack"
 PACKAGES_ROOT="${PROJECT_ROOT}/spack-packages"
@@ -116,8 +126,12 @@ with open(p, 'w') as f: yaml.dump(data, f)
 
 # --- 3. Main Logic Execution ---
 
-BUILD_JOBS=$(get_safe_build_jobs)
-log "Dynamic job scaling: Set to ${BUILD_JOBS} parallel threads based on available memory."
+if [[ -z "$BUILD_JOBS" ]]; then
+    BUILD_JOBS=$(get_safe_build_jobs)
+    log "Dynamic job scaling: Set to ${BUILD_JOBS} parallel threads based on available memory."
+else
+    log "Using user-specified job limit: ${BUILD_JOBS}"
+fi
 
 setup_spack_and_repos
 log "Debug: Spack setup completed successfully."

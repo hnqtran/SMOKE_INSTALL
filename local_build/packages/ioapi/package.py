@@ -11,9 +11,10 @@ class Ioapi(MakefilePackage):
     depends_on("c", type="build")
     depends_on("cxx", type="build")
     depends_on("fortran", type="build")
+    variant("openmp", default=False, description="Build with OpenMP support")
 
     # Generic dependencies (use +shared and +fortran for toolchain consistency)
-    depends_on("hdf5+shared~mpi+cxx+fortran+hl")
+    depends_on("hdf5+shared~mpi+szip+cxx+fortran+hl")
     depends_on("netcdf-c~mpi+shared~dap")
     depends_on("netcdf-fortran+shared")
     depends_on("sed", type="build")
@@ -59,12 +60,19 @@ class Ioapi(MakefilePackage):
         # Inject AOCC-specific flags to resolve relocation errors
         if 'aocc' in self.spec.compiler.name.lower() or self.spec.satisfies('%aocc') or 'clang' in self.spec.compiler.name.lower() or 'llvm' in self.spec.compiler.name.lower():
             env_flags = ' -fPIC -mcmodel=medium'
+            if spec.satisfies("+openmp"):
+                env_flags += " -fopenmp"
         else:
-            env_flags = ''
+            env_flags = ' -fPIC -mcmodel=medium'
+            if spec.satisfies("+openmp"):
+                if 'intel' in spec.compiler.name.lower() or 'oneapi' in spec.compiler.name.lower():
+                    env_flags += " -qopenmp"
+                else:
+                    env_flags += " -fopenmp"
 
-        makeinc.filter(r'^CC\s*=.*',  f'CC  = {self.compiler.cc}{env_flags}')
-        makeinc.filter(r'^CXX\s*=.*', f'CXX = {self.compiler.cxx}{env_flags}')
-        makeinc.filter(r'^FC\s*=.*',  f'FC  = {self.compiler.fc}{env_flags}')
+        makeinc.filter(r'^CC\s*=.*',  f'CC  = {os.environ["CC"]}{env_flags}')
+        makeinc.filter(r'^CXX\s*=.*', f'CXX = {os.environ["CXX"]}{env_flags}')
+        makeinc.filter(r'^FC\s*=.*',  f'FC  = {os.environ["FC"]}{env_flags}')
 
         if 'oneapi' in spec.compiler.name.lower() or 'intel' in spec.compiler.name.lower():
             # Resolve multiple definition errors for iargc/getarg with Intel ifx
@@ -90,6 +98,42 @@ class Ioapi(MakefilePackage):
                     if 'Makefile' in f or 'Makeinclude' in f:
                         filter_file(r'-fno-automatic', '', os.path.join(root, f))
                         filter_file(r'-std=legacy', '', os.path.join(root, f))
+            # Specifically target the AOCC Makeinclude to ensure alignment
+            makeinc_aocc = os.path.join(temp_source_dir, 'ioapi', f'Makeinclude.{BIN}')
+            filter_file(r'^E132\s*=.*', 'E132 = -ffixed-line-length-132', makeinc_aocc)
+            filter_file(r'^MFLAGS\s*=.*', 'MFLAGS = -O3 -ffast-math -funroll-loops -m64', makeinc_aocc)
+            filter_file(r'^ARCHFLAGS\s*=.*', 'ARCHFLAGS = -DAUTO_ARRAYS=1 -DF90=1 -DFLDMN=1 -DFSTR_L=long -DIOAPI_NO_STDOUT=1 -DNEED_ARGS=1', makeinc_aocc)
+
+            # Apply the AMD/AOCC patch for logfile initialization from Ed Anderson (GDIT)
+            initlog_f = os.path.join(temp_source_dir, 'ioapi', 'initlog3.F')
+            filter_file(r'IF \( LOGDEV .LT. 0 \) THEN', 'IF ( .NOT.FINIT3 .OR. LOGDEV .LT. 0 ) THEN', initlog_f)
+        else:
+            # For GCC/Intel, explicitly enforce FSTR_L=int to match SMOKE defaults
+            # This ensures consistency even if the base Makeinclude changes.
+            makeinc_other = os.path.join(temp_source_dir, 'ioapi', f'Makeinclude.{BIN}')
+            filter_file(r'^ARCHFLAGS\s*=.*', 'ARCHFLAGS = -DAUTO_ARRAYS=1 -DF90=1 -DFLDMN=1 -DFSTR_L=int -DIOAPI_NO_STDOUT=1 -DNEED_ARGS=1', makeinc_other)
+        
+        # Fix OpenMP scoping and continuation issues
+        if spec.satisfies("+openmp"):
+            # Fix the specific typo in bcwndw.f90 first
+            filter_file(r'WNAME, DATE, JTIME', 'WNAME, JDATE, JTIME', os.path.join(temp_source_dir, 'm3tools', 'bcwndw.f90'))
+            # Fix undeclared 'I' in m3tools/fills.f90
+            fills_f = os.path.join(temp_source_dir, 'm3tools', 'fills.f90')
+            filter_file(r'INTEGER\s+R, C, L, V', 'INTEGER         R, C, L, V, I', fills_f)
+            filter_file(r'INTEGER\s+R, C, L$', 'INTEGER         R, C, L, I', fills_f)
+            # Fix typo in m3tools/mtxcple.f (NB -> N in SHARED clause)
+            filter_file(r'\bNB\b', 'N', os.path.join(temp_source_dir, 'm3tools', 'mtxcple.f'))
+            # Relax scoping and fix continuation in all Fortran files
+            for root, dirs, files in os.walk(temp_source_dir):
+                for f in files:
+                    if f.endswith('.f') or f.endswith('.f90') or f.endswith('.F'):
+                         fpath = os.path.join(root, f)
+                         # Relax scoping
+                         filter_file(r'DEFAULT\(\s*NONE\s*\)', 'DEFAULT( SHARED )', fpath)
+                         # Ensure continuation '&' is present if line ends with ',' in OpenMP directives
+                         # ONLY for free-form files; fixed-format uses column 6 sentinel and must not have trailing '&'
+                         if f.endswith('.f90') or f.endswith('.F90'):
+                             filter_file(r'(!\$OMP.*),[ \t]*$', r'\1, &', fpath)
 
         with open(makeinc_path, 'r') as f:
             raw_lines = f.readlines()
@@ -153,6 +197,15 @@ class Ioapi(MakefilePackage):
         BIN = self.get_ioapi_bin(spec)
         # Explicitly pass BIN to ensure it overrides defaults without modifying the source Makefile
         make(f'BIN={BIN}', "install", "-j1")
+        # Create 'lib' symlink for compatibility with other packages (like SMOKE)
+        with working_dir(prefix):
+            if not os.path.exists('lib'):
+                os.symlink(BIN, 'lib')
         mkdirp(prefix.include.fixed132)
         install("ioapi/*.EXT", prefix.include)
         install("ioapi/fixed_src/*.EXT", prefix.include.fixed132)
+
+    @property
+    def omp_suffix(self):
+        """Returns a suffix for the view directory if OpenMP is enabled."""
+        return "-omp" if self.spec.satisfies("+openmp") else ""

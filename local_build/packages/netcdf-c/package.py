@@ -19,7 +19,7 @@ class NetcdfC(AutotoolsPackage):
     variant("dap", default=False, description="Enable OPeNDAP support")
     variant("byterange", default=False, description="Enable byterange support")
     variant("blosc", default=False, description="Enable blosc support")
-    variant("szip", default=False, description="Enable szip support")
+    variant("szip", default=True, description="Enable szip support")
     variant("zstd", default=False, description="Enable zstd support")
     variant("fsync", default=False, description="Enable fsync support")
     variant("hdf4", default=False, description="Enable hdf4 support")
@@ -33,7 +33,8 @@ class NetcdfC(AutotoolsPackage):
     depends_on("hdf5+mpi", when="+mpi")
     depends_on("zlib")
     depends_on("m4", type="build")
-    depends_on("curl")
+    depends_on("curl", when="+dap")
+    depends_on("curl", when="+byterange")
     depends_on("cmake@3.18:", type="build")
     depends_on("c", type="build")
     depends_on("cxx", type="build")
@@ -51,11 +52,15 @@ class NetcdfC(AutotoolsPackage):
         config_args = [
             "--enable-static",
             "--enable-netcdf-4",
-            "--disable-dap",
             "--disable-libxml2",
             "--disable-parallel-tests",
             "--with-hdf5={0}".format(spec["hdf5"].prefix),
         ]
+
+        if "+dap" in spec or "+byterange" in spec:
+            config_args.append("--with-curl={0}".format(spec["curl"].prefix))
+        else:
+            config_args.append("--disable-curl")
 
         if "+shared" in spec:
             config_args.append("--enable-shared")
