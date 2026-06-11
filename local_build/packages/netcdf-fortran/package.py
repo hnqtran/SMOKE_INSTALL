@@ -53,17 +53,6 @@ class NetcdfFortran(AutotoolsPackage):
         else:
             config_args.append("--disable-shared")
 
-        # Use Spack's compiler configuration with safe attribute access
-        # Only set compilers that exist in the current compiler spec
-        if hasattr(self.compiler, 'cc') and self.compiler.cc:
-            config_args.append("CC={0}".format(self.compiler.cc))
-        if hasattr(self.compiler, 'cxx') and self.compiler.cxx:
-            config_args.append("CXX={0}".format(self.compiler.cxx))
-        if hasattr(self.compiler, 'fc') and self.compiler.fc:
-            config_args.append("FC={0}".format(self.compiler.fc))
-        if hasattr(self.compiler, 'f77') and self.compiler.f77:
-            config_args.append("F77={0}".format(self.compiler.f77))
-
         if "+mpi" in spec:
             config_args.append("CC={0}".format(spec["mpi"].mpicc))
             config_args.append("FC={0}".format(spec["mpi"].mpifc))
