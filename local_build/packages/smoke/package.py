@@ -64,7 +64,7 @@ class Smoke(MakefilePackage):
         name = spec.compiler.name.lower()
         if 'gcc' in name:
             eflag    = "-ffixed-line-length-132 -fno-backslash -fallow-argument-mismatch"
-            optflag  = "-Ofast -march=native -flto=auto -funroll-loops -fno-stack-arrays -DFLDMN=1 -DFSTR_L=int -DNEED_ARGS=1"
+            optflag  = "-Ofast -march=native -funroll-loops -fno-stack-arrays -DFLDMN=1 -DFSTR_L=int -DNEED_ARGS=1"
         elif 'oneapi' in name or 'intel' in name:
             eflag    = "-extend-source 132 -zero"
             optflag  = "-O3 -DFLDMN=1 -DFSTR_L=int -DNEED_ARGS=1"
@@ -91,7 +91,7 @@ class Smoke(MakefilePackage):
         link_omp = _omp_flags[0]  # Always link OMP to resolve ioapi symbols
         
         # Additional optimization link flags (e.g. LTO)
-        link_extra = "-flto" if ("gcc" in name or "aocc" in name) else ""
+        link_extra = "-flto" if "aocc" in name else ""
         
         makeinclude = f"""
 BASEDIR = {self.stage.source_path}/src

@@ -123,6 +123,7 @@ apptainer exec --containall \
     --env REBUILD_IOAPI="$REBUILD_IOAPI" \
     --env REBUILD_SMOKE="$REBUILD_SMOKE" \
     --env BUILD_JOBS="$BUILD_JOBS" \
+    --env SMOKE_VER_SPEC="$SMOKE_VER_SPEC" \
     "$OS_IMAGE" /bin/bash <<'EOF'
 set -euo pipefail
 log() { echo "==> [CONTAINER] $1"; }
@@ -143,6 +144,7 @@ log "DEBUG: Spack version: $(spack --version)"
 log "Configuring Enclave..."
 mkdir -p "$SPACK_ROOT/etc/spack"
 rm -f "$SPACK_ROOT/etc/spack/"{config,packages,compilers,repos,upstreams}.yaml
+rm -rf "$SPACK_ROOT/etc/spack/site"
 
 # High-capacity staging and cache redirection is mandatory to prevent disk exhaustion in /proj (Finding #142)
 log "DEBUG: Creating config.yaml with /tmp redirection..."
